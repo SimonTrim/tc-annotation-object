@@ -4,6 +4,7 @@ import type {
   ObjectBoundingBox,
 } from "@/types";
 
+const LOG = "[AnnotationObj]";
 const BATCH_SIZE = 50;
 
 // ── Données fictives (mode dev) ──
@@ -27,42 +28,6 @@ const MOCK_PROPS: ObjectProperties[] = [
         properties: [
           { name: "Width", value: "200 mm", type: "number" },
           { name: "Height", value: "3000 mm", type: "number" },
-          { name: "Length", value: "5400 mm", type: "number" },
-        ],
-      },
-    ],
-  },
-  {
-    id: 2,
-    class: "IfcColumn",
-    product: { name: "Poteau BA 30x30", objectType: "STANDARD" },
-    properties: [
-      {
-        set: "Pset_ColumnCommon",
-        properties: [
-          { name: "LoadBearing", value: "true", type: "boolean" },
-          { name: "FireRating", value: "R 60", type: "string" },
-        ],
-      },
-      {
-        set: "BaseQuantities",
-        properties: [
-          { name: "Width", value: "300 mm", type: "number" },
-          { name: "Height", value: "3200 mm", type: "number" },
-        ],
-      },
-    ],
-  },
-  {
-    id: 3,
-    class: "IfcBeam",
-    product: { name: "Poutre IPE 300", objectType: "STANDARD" },
-    properties: [
-      {
-        set: "Pset_BeamCommon",
-        properties: [
-          { name: "LoadBearing", value: "true", type: "boolean" },
-          { name: "Span", value: "6000 mm", type: "number" },
         ],
       },
     ],
@@ -71,9 +36,32 @@ const MOCK_PROPS: ObjectProperties[] = [
 
 const MOCK_BBOXES: ObjectBoundingBox[] = [
   { runtimeId: 1, min: { x: 0, y: 0, z: 0 }, max: { x: 5.4, y: 0.2, z: 3 } },
-  { runtimeId: 2, min: { x: 6, y: 0, z: 0 }, max: { x: 6.3, y: 0.3, z: 3.2 } },
-  { runtimeId: 3, min: { x: 0, y: 0, z: 3 }, max: { x: 6, y: 0.3, z: 3.3 } },
 ];
+
+// ── Normaliser les propriétés (format API variable) ──
+
+function normalizeObjectProperties(raw: unknown[]): ObjectProperties[] {
+  return raw.map((item) => {
+    const obj = item as Record<string, unknown>;
+    // L'API peut retourner "id", "runtimeId", ou les deux
+    const id = (obj.id ?? obj.runtimeId ?? 0) as number;
+    return {
+      ...obj,
+      id,
+    } as ObjectProperties;
+  });
+}
+
+function normalizeBoundingBoxes(raw: unknown[]): ObjectBoundingBox[] {
+  return raw.map((item) => {
+    const obj = item as Record<string, unknown>;
+    const runtimeId = (obj.runtimeId ?? obj.id ?? 0) as number;
+    return {
+      ...obj,
+      runtimeId,
+    } as ObjectBoundingBox;
+  });
+}
 
 // ── API Viewer Bridge ──
 
@@ -91,9 +79,10 @@ export async function fetchObjectProperties(
     const batch = runtimeIds.slice(i, i + BATCH_SIZE);
     try {
       const props = await api.viewer.getObjectProperties(modelId, batch);
-      results.push(...(props as ObjectProperties[]));
+      console.log(`${LOG} Raw props response:`, JSON.stringify(props).slice(0, 500));
+      results.push(...normalizeObjectProperties(props as unknown[]));
     } catch (err) {
-      console.error("[ViewerBridge] getObjectProperties batch failed:", err);
+      console.error(`${LOG} getObjectProperties batch failed:`, err);
     }
   }
   return results;
@@ -110,9 +99,10 @@ export async function fetchObjectBoundingBoxes(
 
   try {
     const bboxes = await api.viewer.getObjectBoundingBoxes(modelId, runtimeIds);
-    return bboxes as ObjectBoundingBox[];
+    console.log(`${LOG} Raw bboxes response:`, JSON.stringify(bboxes).slice(0, 500));
+    return normalizeBoundingBoxes(bboxes as unknown[]);
   } catch (err) {
-    console.error("[ViewerBridge] getObjectBoundingBoxes failed:", err);
+    console.error(`${LOG} getObjectBoundingBoxes failed:`, err);
     return [];
   }
 }

@@ -9,6 +9,8 @@ import type {
   ColorRGBA,
 } from "@/types";
 
+const LOG = "[AnnotationEngine]";
+
 function hexToRgba(hex: string, alpha = 255): ColorRGBA {
   const cleaned = hex.replace("#", "");
   return {
@@ -29,7 +31,6 @@ function buildAnnotationText(
   for (const toggle of enabledProps) {
     if (!toggle.enabled) continue;
 
-    // Propriétés d'identité (spéciales)
     if (toggle.key === "Identité::Classe IFC" && obj.class) {
       parts.push(obj.class);
       continue;
@@ -39,18 +40,24 @@ function buildAnnotationText(
       continue;
     }
 
-    // Propriétés des PropertySets
+    let found = false;
     for (const pset of obj.properties ?? []) {
       if (pset.set !== toggle.propertySet) continue;
       const prop = pset.properties?.find((p) => p.name === toggle.propertyName);
       if (prop) {
         const value = String(prop.value);
         parts.push(settings.showUnits ? value : value.replace(/\s*(mm|m|kg|m²|m³)$/i, "").trim());
+        found = true;
         break;
       }
     }
+
+    if (!found) {
+      console.warn(`${LOG} Property not found: ${toggle.key} in object id=${obj.id}`);
+    }
   }
 
+  console.log(`${LOG} buildAnnotationText: ${parts.length} values → "${parts.join(" | ")}"`);
   if (parts.length === 0) return "";
 
   return settings.horizontal ? parts.join(settings.separator) : parts.join("\n");
@@ -72,11 +79,16 @@ export async function createAnnotationsForObject(
   settings: AnnotationSettings,
 ): Promise<AnnotatedObject | null> {
   const text = buildAnnotationText(props, enabledProps, settings);
-  if (!text) return null;
+  if (!text) {
+    console.warn(`${LOG} Empty text for runtimeId=${runtimeId}, skipping`);
+    return null;
+  }
 
   const centerX = ((bbox.min.x + bbox.max.x) / 2) * 1000;
   const centerY = ((bbox.min.y + bbox.max.y) / 2) * 1000;
   const topZ = bbox.max.z * 1000;
+
+  console.log(`${LOG} Placing markup at [${centerX}, ${centerY}, ${topZ}] text="${text.substring(0, 40)}"`);
 
   const color = hexToRgba(settings.color);
 
@@ -100,7 +112,9 @@ export async function createAnnotationsForObject(
   ];
 
   try {
+    console.log(`${LOG} addTextMarkup payload:`, JSON.stringify(markups).slice(0, 300));
     const created = await api.markup.addTextMarkup(markups);
+    console.log(`${LOG} addTextMarkup response:`, JSON.stringify(created).slice(0, 300));
     const markupIds = created.map((m) => m.id).filter((id): id is number => id != null);
 
     const iconId = ++iconCounter;
@@ -115,9 +129,10 @@ export async function createAnnotationsForObject(
       size: 24,
     });
 
+    console.log(`${LOG} Created annotation: markupIds=[${markupIds}], iconId=${iconId}`);
     return { modelId, runtimeId, markupIds, iconId, properties: props };
   } catch (err) {
-    console.error("[AnnotationEngine] Erreur création annotation:", err);
+    console.error(`${LOG} Error creating annotation for runtimeId=${runtimeId}:`, err);
     return null;
   }
 }
@@ -127,6 +142,8 @@ export async function removeAllAnnotations(
   annotated: AnnotatedObject[],
 ): Promise<void> {
   if (annotated.length === 0) return;
+
+  console.log(`${LOG} Removing ${annotated.length} annotations`);
 
   try {
     const allMarkupIds = annotated.flatMap((a) => a.markupIds);
@@ -143,6 +160,6 @@ export async function removeAllAnnotations(
       });
     }
   } catch (err) {
-    console.error("[AnnotationEngine] Erreur suppression annotations:", err);
+    console.error(`${LOG} Error removing annotations:`, err);
   }
 }

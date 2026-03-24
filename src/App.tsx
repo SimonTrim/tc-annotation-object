@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect } from "react";
+import { Suspense, lazy } from "react";
 import { LayoutGrid, Settings, Info, WifiOff } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,7 @@ import { Loader } from "@/components/Loader";
 import {
   useTrimbleConnect,
   TrimbleProvider,
+  useTrimbleContext,
 } from "@/hooks/useTrimbleConnect";
 import { useSettings } from "@/hooks/useSettings";
 import { useAnnotations } from "@/hooks/useAnnotations";
@@ -31,17 +32,10 @@ const AboutTab = lazy(() =>
 function AppContent() {
   const { settings, updateSettings, resetSettings } = useSettings();
   const { selection, api } = useTrimbleContext();
-  const annotations = useAnnotations(api, selection);
-
-  // Rafraîchir les annotations quand les toggles ou settings changent
-  useEffect(() => {
-    annotations.refreshAnnotations(settings);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [annotations.allProperties, settings]);
+  const annotations = useAnnotations(api, selection, settings);
 
   return (
     <Tabs defaultValue="inquire" className="flex flex-col h-full">
-      {/* Header avec onglets */}
       <div className="px-2 pt-2 pb-0">
         <div className="flex items-center justify-between mb-2 px-1">
           <h1 className="text-xs font-bold uppercase tracking-wider text-primary">
@@ -68,10 +62,9 @@ function AppContent() {
         </TabsList>
       </div>
 
-      {/* Contenu des onglets */}
       <ErrorBoundary>
         <Suspense fallback={<Loader />}>
-          <TabsContent value="inquire" className="flex-1" forceMount>
+          <TabsContent value="inquire" className="flex-1">
             <InquireObjectsTab settings={settings} annotations={annotations} />
           </TabsContent>
 
@@ -91,9 +84,6 @@ function AppContent() {
     </Tabs>
   );
 }
-
-// Import du context utilisé dans AppContent
-import { useTrimbleContext } from "@/hooks/useTrimbleConnect";
 
 export default function App() {
   const trimble = useTrimbleConnect();

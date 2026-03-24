@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type {
   TrimbleAPI,
   ViewerSelection,
@@ -22,22 +22,32 @@ const LOG = "[AnnotationObj]";
 export function useAnnotations(
   api: TrimbleAPI | null,
   selection: ViewerSelection[],
+  settings: AnnotationSettings,
 ) {
-  const [allProperties, setAllProperties] = useState<PropertyToggleState[]>([]);
+  const [properties, setProperties] = useState<PropertyToggleState[]>([]);
   const [objectsProps, setObjectsProps] = useState<ObjectProperties[]>([]);
   const [annotatedObjects, setAnnotatedObjects] = useState<AnnotatedObject[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [maxReached, setMaxReached] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("pset");
 
+  // Refs pour accéder aux valeurs courantes dans les callbacks async
   const annotatedRef = useRef<AnnotatedObject[]>([]);
   annotatedRef.current = annotatedObjects;
+  const propsRef = useRef(properties);
+  propsRef.current = properties;
+  const objectsPropsRef = useRef(objectsProps);
+  objectsPropsRef.current = objectsProps;
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   /** Extraire toutes les propriétés uniques des objets */
   const extractProperties = useCallback(
-    (propsArray: ObjectProperties[], existing: PropertyToggleState[]) => {
-      const seen = new Set(existing.map((p) => p.key));
-      const result = [...existing];
+    (propsArray: ObjectProperties[]) => {
+      const seen = new Set<string>();
+      const result: PropertyToggleState[] = [];
 
       for (const obj of propsArray) {
         if (obj.class) {
@@ -86,20 +96,27 @@ export function useAnnotations(
 
     if (totalCount === 0) {
       setObjectsProps([]);
+      setProperties([]);
       setMaxReached(false);
+      // Nettoyer les annotations 3D
+      if (api && annotatedRef.current.length > 0) {
+        removeAllAnnotations(api, annotatedRef.current).then(() => {
+          setAnnotatedObjects([]);
+        });
+      }
       return;
     }
 
     let cancelled = false;
 
-    async function load(maxObjects: number) {
+    async function load() {
       setIsLoading(true);
-      setMaxReached(totalCount > maxObjects);
+      setMaxReached(totalCount > settings.maxObjects);
 
       try {
         const allProps: ObjectProperties[] = [];
         for (const sel of selection) {
-          const ids = sel.objectRuntimeIds.slice(0, maxObjects - allProps.length);
+          const ids = sel.objectRuntimeIds.slice(0, settings.maxObjects - allProps.length);
           if (ids.length === 0) break;
 
           console.log(`${LOG} Fetching props for model=${sel.modelId}, ids=[${ids.join(",")}]`);
@@ -110,7 +127,7 @@ export function useAnnotations(
 
         if (!cancelled) {
           setObjectsProps(allProps);
-          setAllProperties((prev) => extractProperties(allProps, prev));
+          setProperties(extractProperties(allProps));
           console.log(`${LOG} Properties loaded: ${allProps.length} objects`);
         }
       } catch (err) {
@@ -120,70 +137,108 @@ export function useAnnotations(
       }
     }
 
-    load(20);
-
+    load();
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, selection, extractProperties]);
 
-  /** Mettre à jour les annotations 3D dans le viewer */
-  const refreshAnnotations = useCallback(
-    async (settings: AnnotationSettings) => {
-      if (!api) return;
-
-      await removeAllAnnotations(api, annotatedRef.current);
-
-      const enabledProps = allProperties.filter((p) => p.enabled);
-      if (enabledProps.length === 0 || objectsProps.length === 0) {
-        setAnnotatedObjects([]);
-        return;
-      }
-
-      console.log(`${LOG} Creating annotations for ${objectsProps.length} objects, ${enabledProps.length} props enabled`);
-
-      const newAnnotated: AnnotatedObject[] = [];
-
-      for (const sel of selection) {
-        const limitedIds = sel.objectRuntimeIds.slice(
-          0,
-          settings.maxObjects - newAnnotated.length,
-        );
-        if (limitedIds.length === 0) break;
-
-        const bboxes = await fetchObjectBoundingBoxes(api, sel.modelId, limitedIds);
-
-        for (const runtimeId of limitedIds) {
-          const props = objectsProps.find((p) => p.id === runtimeId);
-          const bbox = bboxes.find((b) => b.runtimeId === runtimeId);
-          if (!props || !bbox) continue;
-
-          const annotated = await createAnnotationsForObject(
-            api, sel.modelId, runtimeId, props, enabledProps, bbox, settings,
-          );
-          if (annotated) newAnnotated.push(annotated);
-        }
-      }
-
-      setAnnotatedObjects(newAnnotated);
-      console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
-    },
-    [api, allProperties, objectsProps, selection],
+  /** Clé stable des propriétés activées (pour déclencher le refresh) */
+  const enabledKey = useMemo(
+    () => properties.filter((p) => p.enabled).map((p) => p.key).join("|"),
+    [properties],
   );
+
+  const settingsKey = `${settings.color}|${settings.separator}|${settings.horizontal}|${settings.showUnits}`;
+
+  /** Fonction de refresh stable (dépend uniquement de api) */
+  const doRefresh = useCallback(async () => {
+    if (!api) return;
+
+    const currentProps = propsRef.current;
+    const currentObjProps = objectsPropsRef.current;
+    const currentSelection = selectionRef.current;
+    const currentSettings = settingsRef.current;
+
+    // Supprimer les anciennes annotations
+    await removeAllAnnotations(api, annotatedRef.current);
+
+    const enabledProps = currentProps.filter((p) => p.enabled);
+    if (enabledProps.length === 0 || currentObjProps.length === 0) {
+      setAnnotatedObjects([]);
+      return;
+    }
+
+    console.log(`${LOG} Creating annotations: ${currentObjProps.length} objects, ${enabledProps.length} props`);
+
+    const newAnnotated: AnnotatedObject[] = [];
+
+    for (const sel of currentSelection) {
+      const limitedIds = sel.objectRuntimeIds.slice(
+        0,
+        currentSettings.maxObjects - newAnnotated.length,
+      );
+      if (limitedIds.length === 0) break;
+
+      const bboxes = await fetchObjectBoundingBoxes(api, sel.modelId, limitedIds);
+      console.log(`${LOG} Bounding boxes:`, bboxes);
+
+      for (const runtimeId of limitedIds) {
+        // Chercher les propriétés — compatible id et runtimeId
+        const props = currentObjProps.find(
+          (p) => p.id === runtimeId
+            || (p as unknown as Record<string, unknown>).runtimeId === runtimeId,
+        );
+        const bbox = bboxes.find(
+          (b) => b.runtimeId === runtimeId
+            || (b as unknown as Record<string, unknown>).id === runtimeId,
+        );
+
+        console.log(`${LOG} Match runtimeId=${runtimeId}: props=${!!props}, bbox=${!!bbox}`);
+
+        if (!props || !bbox) continue;
+
+        const annotated = await createAnnotationsForObject(
+          api, sel.modelId, runtimeId, props, enabledProps, bbox, currentSettings,
+        );
+        if (annotated) newAnnotated.push(annotated);
+      }
+    }
+
+    setAnnotatedObjects(newAnnotated);
+    console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
+  }, [api]);
+
+  /** Déclencher le refresh quand les props activées ou settings changent */
+  useEffect(() => {
+    if (!enabledKey) {
+      // Aucune prop activée — supprimer les annotations
+      if (api && annotatedRef.current.length > 0) {
+        removeAllAnnotations(api, annotatedRef.current).then(() => {
+          setAnnotatedObjects([]);
+        });
+      }
+      return;
+    }
+
+    doRefresh();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabledKey, settingsKey, doRefresh]);
 
   /** Basculer l'état d'une propriété */
   const toggleProperty = useCallback((key: string) => {
-    setAllProperties((prev) =>
+    setProperties((prev) =>
       prev.map((p) => (p.key === key ? { ...p, enabled: !p.enabled } : p)),
     );
   }, []);
 
   /** Activer/désactiver toutes les propriétés */
   const toggleAll = useCallback((enabled: boolean) => {
-    setAllProperties((prev) => prev.map((p) => ({ ...p, enabled })));
+    setProperties((prev) => prev.map((p) => ({ ...p, enabled })));
   }, []);
 
-  /** Propriétés triées */
-  const sortedProperties = (() => {
-    const sorted = [...allProperties];
+  /** Propriétés triées (mémoïsées) */
+  const sortedProperties = useMemo(() => {
+    const sorted = [...properties];
     switch (sortMode) {
       case "alpha-asc":
         return sorted.sort((a, b) => a.propertyName.localeCompare(b.propertyName));
@@ -193,19 +248,25 @@ export function useAnnotations(
       default:
         return sorted.sort((a, b) => a.propertySet.localeCompare(b.propertySet));
     }
-  })();
+  }, [properties, sortMode]);
 
-  /** Grouper par PropertySet */
-  const groupedProperties = sortedProperties.reduce<
-    Record<string, PropertyToggleState[]>
-  >((acc, prop) => {
-    const group = prop.propertySet;
-    if (!acc[group]) acc[group] = [];
-    acc[group]!.push(prop);
-    return acc;
-  }, {});
+  /** Grouper par PropertySet (mémoïsé) */
+  const groupedProperties = useMemo(() => {
+    return sortedProperties.reduce<Record<string, PropertyToggleState[]>>(
+      (acc, prop) => {
+        const group = prop.propertySet;
+        if (!acc[group]) acc[group] = [];
+        acc[group]!.push(prop);
+        return acc;
+      },
+      {},
+    );
+  }, [sortedProperties]);
 
-  const enabledCount = allProperties.filter((p) => p.enabled).length;
+  const enabledCount = useMemo(
+    () => properties.filter((p) => p.enabled).length,
+    [properties],
+  );
 
   return {
     allProperties: sortedProperties,
@@ -217,7 +278,6 @@ export function useAnnotations(
     enabledCount,
     sortMode,
     setSortMode,
-    refreshAnnotations,
     toggleProperty,
     toggleAll,
   };
