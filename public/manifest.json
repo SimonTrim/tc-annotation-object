@@ -1,0 +1,20 @@
+{
+  "name": "Annotation Objets",
+  "version": "1.0.0",
+  "api": "1.0",
+  "extensions": [
+    {
+      "type": "viewerModule",
+      "id": "tc-annotation-object",
+      "title": "Annotation Objets",
+      "icon": "./icon-48.png",
+      "url": "./index.html",
+      "infoUrl": ""
+    }
+  ],
+  "permissions": ["project.read", "files.read", "views.read"],
+  "dependencies": {
+    "@trimble/connect-workspace-api": "^2.0.0"
+  },
+  "description": "Affiche des annotations de propriétés sur les objets 3D sélectionnés dans le Viewer Trimble Connect."
+}

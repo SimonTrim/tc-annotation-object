@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/* ── Modus 2.0 Design Tokens + shadcn/ui theme ── */
+
+@theme inline {
+  --font-sans: "Open Sans", ui-sans-serif, system-ui, sans-serif;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+/* ── Light theme (Modus 2.0 aligned) ── */
+
+:root {
+  --background: #ffffff;
+  --foreground: #252a2e;
+  --card: #ffffff;
+  --card-foreground: #252a2e;
+  --popover: #ffffff;
+  --popover-foreground: #252a2e;
+  --primary: #0063a3;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f1f6;
+  --secondary-foreground: #252a2e;
+  --muted: #f1f1f6;
+  --muted-foreground: #6a6e79;
+  --accent: #e0e1e9;
+  --accent-foreground: #252a2e;
+  --destructive: #da212c;
+  --destructive-foreground: #ffffff;
+  --success: #1e8a44;
+  --success-foreground: #ffffff;
+  --warning: #e49325;
+  --warning-foreground: #252a2e;
+  --border: #e0e1e9;
+  --input: #e0e1e9;
+  --ring: #0063a3;
+}
+
+/* ── Dark theme (Modus 2.0 aligned) ── */
+
+.dark {
+  --background: #171c1f;
+  --foreground: #f1f1f6;
+  --card: #1e2529;
+  --card-foreground: #f1f1f6;
+  --popover: #1e2529;
+  --popover-foreground: #f1f1f6;
+  --primary: #217cbb;
+  --primary-foreground: #ffffff;
+  --secondary: #2b3338;
+  --secondary-foreground: #f1f1f6;
+  --muted: #2b3338;
+  --muted-foreground: #90939f;
+  --accent: #353d44;
+  --accent-foreground: #f1f1f6;
+  --destructive: #e45f5f;
+  --destructive-foreground: #ffffff;
+  --success: #4cb06b;
+  --success-foreground: #ffffff;
+  --warning: #f0a832;
+  --warning-foreground: #252a2e;
+  --border: #353d44;
+  --input: #353d44;
+  --ring: #217cbb;
+}
+
+/* ── Base ── */
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  margin: 0;
+  font-family: "Open Sans", ui-sans-serif, system-ui, sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Extension runs inside a narrow iframe panel */
+#root {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Scrollbar styling ── */
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--foreground);
+}

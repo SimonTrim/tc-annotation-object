@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Annotation Objets — Trimble Connect</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-background text-foreground antialiased">
+    <div id="root"></div>
+    <!-- Workspace API SDK (obligatoire) -->
+    <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+    <!-- Extension API legacy (compatibilité) -->
+    <script src="https://app.connect.trimble.com/tc/static/5.0.0/tcw-extension-api.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
