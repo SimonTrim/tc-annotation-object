@@ -11,6 +11,8 @@ import type {
 
 const LOG = "[AnnotationEngine]";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 function hexToRgba(hex: string, alpha = 255): ColorRGBA {
   const cleaned = hex.replace("#", "");
   return {
@@ -70,6 +72,12 @@ const ICON_BASE_URL =
 
 let iconCounter = 10000;
 
+/**
+ * TC viewer ne supporte pas les appels markup en parallèle.
+ * Chaque opération (remove, add) doit être séquentielle avec un délai.
+ */
+const ATLAS_DELAY = 350;
+
 export async function createAnnotationsForObject(
   api: TrimbleAPI,
   modelId: string,
@@ -89,7 +97,11 @@ export async function createAnnotationsForObject(
   const centerY = ((bbox.min.y + bbox.max.y) / 2) * 1000;
   const topZ = bbox.max.z * 1000;
 
-  console.log(`${LOG} Placing markup at [${centerX}, ${centerY}, ${topZ}] text="${text.substring(0, 40)}"`);
+  const lineCount = text.split("\n").length;
+  const lineHeight = 300;
+  const endOffsetZ = 800 + lineCount * lineHeight;
+
+  console.log(`${LOG} Placing markup at [${centerX.toFixed(0)}, ${centerY.toFixed(0)}, ${topZ.toFixed(0)}] lines=${lineCount}`);
 
   const color = hexToRgba(settings.color);
 
@@ -106,17 +118,18 @@ export async function createAnnotationsForObject(
       end: {
         positionX: centerX + 800,
         positionY: centerY + 800,
-        positionZ: topZ + 1200,
+        positionZ: topZ + endOffsetZ,
       },
       color,
     },
   ];
 
   try {
-    console.log(`${LOG} addTextMarkup payload:`, JSON.stringify(markups).slice(0, 300));
     const created = await api.markup.addTextMarkup(markups);
-    console.log(`${LOG} addTextMarkup response:`, JSON.stringify(created).slice(0, 300));
     const markupIds = created.map((m) => m.id).filter((id): id is number => id != null);
+    console.log(`${LOG} TextMarkup created: ids=[${markupIds}]`);
+
+    await sleep(ATLAS_DELAY);
 
     const iconId = ++iconCounter;
     await api.viewer.addIcon({
@@ -150,17 +163,26 @@ export async function removeAllAnnotations(
     const allMarkupIds = annotated.flatMap((a) => a.markupIds);
     if (allMarkupIds.length > 0) {
       await api.markup.removeMarkups(allMarkupIds);
+      await sleep(ATLAS_DELAY);
     }
 
     for (const obj of annotated) {
-      await api.viewer.removeIcon({
-        id: obj.iconId,
-        iconPath: "",
-        position: { x: 0, y: 0, z: 0 },
-        size: 0,
-      });
+      try {
+        await api.viewer.removeIcon({
+          id: obj.iconId,
+          iconPath: "",
+          position: { x: 0, y: 0, z: 0 },
+          size: 0,
+        });
+      } catch {
+        // L'icône peut déjà avoir été supprimée
+      }
     }
+
+    await sleep(ATLAS_DELAY);
+    console.log(`${LOG} Annotations removed`);
   } catch (err) {
     console.error(`${LOG} Error removing annotations:`, err);
+    await sleep(ATLAS_DELAY);
   }
 }
