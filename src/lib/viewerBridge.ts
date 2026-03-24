@@ -7,6 +7,33 @@ import type {
 const LOG = "[AnnotationObj]";
 const BATCH_SIZE = 50;
 
+// ── Safe JSON (BigInt → Number) ──
+
+function safeStringify(value: unknown, maxLen = 500): string {
+  try {
+    const str = JSON.stringify(value, (_key, val) =>
+      typeof val === "bigint" ? Number(val) : val,
+    );
+    return str.length > maxLen ? str.slice(0, maxLen) + "…" : str;
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+function convertBigInts(obj: unknown): unknown {
+  if (typeof obj === "bigint") return Number(obj);
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map(convertBigInts);
+  if (typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      result[k] = convertBigInts(v);
+    }
+    return result;
+  }
+  return obj;
+}
+
 // ── Données fictives (mode dev) ──
 
 const MOCK_PROPS: ObjectProperties[] = [
@@ -38,28 +65,21 @@ const MOCK_BBOXES: ObjectBoundingBox[] = [
   { runtimeId: 1, min: { x: 0, y: 0, z: 0 }, max: { x: 5.4, y: 0.2, z: 3 } },
 ];
 
-// ── Normaliser les propriétés (format API variable) ──
+// ── Normaliser les propriétés (format API variable + BigInt) ──
 
 function normalizeObjectProperties(raw: unknown[]): ObjectProperties[] {
   return raw.map((item) => {
-    const obj = item as Record<string, unknown>;
-    // L'API peut retourner "id", "runtimeId", ou les deux
+    const obj = convertBigInts(item) as Record<string, unknown>;
     const id = (obj.id ?? obj.runtimeId ?? 0) as number;
-    return {
-      ...obj,
-      id,
-    } as ObjectProperties;
+    return { ...obj, id } as ObjectProperties;
   });
 }
 
 function normalizeBoundingBoxes(raw: unknown[]): ObjectBoundingBox[] {
   return raw.map((item) => {
-    const obj = item as Record<string, unknown>;
+    const obj = convertBigInts(item) as Record<string, unknown>;
     const runtimeId = (obj.runtimeId ?? obj.id ?? 0) as number;
-    return {
-      ...obj,
-      runtimeId,
-    } as ObjectBoundingBox;
+    return { ...obj, runtimeId } as ObjectBoundingBox;
   });
 }
 
@@ -79,8 +99,10 @@ export async function fetchObjectProperties(
     const batch = runtimeIds.slice(i, i + BATCH_SIZE);
     try {
       const props = await api.viewer.getObjectProperties(modelId, batch);
-      console.log(`${LOG} Raw props response:`, JSON.stringify(props).slice(0, 500));
-      results.push(...normalizeObjectProperties(props as unknown[]));
+      console.log(`${LOG} Raw props response:`, safeStringify(props));
+      const normalized = normalizeObjectProperties(props as unknown[]);
+      console.log(`${LOG} Normalized ${normalized.length} properties, ids=[${normalized.map((p) => p.id).join(",")}]`);
+      results.push(...normalized);
     } catch (err) {
       console.error(`${LOG} getObjectProperties batch failed:`, err);
     }
@@ -99,7 +121,7 @@ export async function fetchObjectBoundingBoxes(
 
   try {
     const bboxes = await api.viewer.getObjectBoundingBoxes(modelId, runtimeIds);
-    console.log(`${LOG} Raw bboxes response:`, JSON.stringify(bboxes).slice(0, 500));
+    console.log(`${LOG} Raw bboxes response:`, safeStringify(bboxes));
     return normalizeBoundingBoxes(bboxes as unknown[]);
   } catch (err) {
     console.error(`${LOG} getObjectBoundingBoxes failed:`, err);
