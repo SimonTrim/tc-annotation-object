@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from "react";
+import { useCallback } from "react";
 import {
   ArrowUpAZ,
   ArrowDownAZ,
@@ -16,15 +16,16 @@ import { Separator } from "@/components/ui/separator";
 import { PropertyToggleList } from "@/components/PropertyToggleList";
 import { Loader } from "@/components/Loader";
 import { useTrimbleContext } from "@/hooks/useTrimbleConnect";
-import { useAnnotations } from "@/hooks/useAnnotations";
 import type { AnnotationSettings, SortMode } from "@/types";
+import type { useAnnotations } from "@/hooks/useAnnotations";
 
 interface InquireObjectsTabProps {
   settings: AnnotationSettings;
+  annotations: ReturnType<typeof useAnnotations>;
 }
 
-export function InquireObjectsTab({ settings }: InquireObjectsTabProps) {
-  const { selection, api } = useTrimbleContext();
+export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabProps) {
+  const { selection } = useTrimbleContext();
   const {
     allProperties,
     groupedProperties,
@@ -33,21 +34,9 @@ export function InquireObjectsTab({ settings }: InquireObjectsTabProps) {
     enabledCount,
     sortMode,
     setSortMode,
-    loadSelection,
-    refreshAnnotations,
     toggleProperty,
     toggleAll,
-  } = useAnnotations(api);
-
-  // Charger les propriétés quand la sélection change
-  useEffect(() => {
-    loadSelection(selection, settings.maxObjects);
-  }, [selection, loadSelection, settings.maxObjects]);
-
-  // Rafraîchir les annotations quand les toggles ou settings changent
-  useEffect(() => {
-    refreshAnnotations(selection, settings);
-  }, [allProperties, settings, selection, refreshAnnotations]);
+  } = annotations;
 
   const enabledProps = allProperties.filter((p) => p.enabled);
 

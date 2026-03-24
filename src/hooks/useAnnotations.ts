@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type {
   TrimbleAPI,
   ViewerSelection,
@@ -17,7 +17,12 @@ import {
   removeAllAnnotations,
 } from "@/lib/annotationEngine";
 
-export function useAnnotations(api: TrimbleAPI | null) {
+const LOG = "[AnnotationObj]";
+
+export function useAnnotations(
+  api: TrimbleAPI | null,
+  selection: ViewerSelection[],
+) {
   const [allProperties, setAllProperties] = useState<PropertyToggleState[]>([]);
   const [objectsProps, setObjectsProps] = useState<ObjectProperties[]>([]);
   const [annotatedObjects, setAnnotatedObjects] = useState<AnnotatedObject[]>([]);
@@ -28,7 +33,7 @@ export function useAnnotations(api: TrimbleAPI | null) {
   const annotatedRef = useRef<AnnotatedObject[]>([]);
   annotatedRef.current = annotatedObjects;
 
-  /** Extraire toutes les propriétés uniques des objets sélectionnés */
+  /** Extraire toutes les propriétés uniques des objets */
   const extractProperties = useCallback(
     (propsArray: ObjectProperties[], existing: PropertyToggleState[]) => {
       const seen = new Set(existing.map((p) => p.key));
@@ -70,52 +75,61 @@ export function useAnnotations(api: TrimbleAPI | null) {
     [],
   );
 
-  /** Charger les propriétés pour une sélection donnée */
-  const loadSelection = useCallback(
-    async (selection: ViewerSelection[], maxObjects: number) => {
-      const totalCount = selection.reduce(
-        (sum, s) => sum + s.objectRuntimeIds.length,
-        0,
-      );
+  /** Charger les propriétés quand la sélection change */
+  useEffect(() => {
+    const totalCount = selection.reduce(
+      (sum, s) => sum + s.objectRuntimeIds.length,
+      0,
+    );
 
+    console.log(`${LOG} Selection effect: ${totalCount} object(s)`);
+
+    if (totalCount === 0) {
+      setObjectsProps([]);
+      setMaxReached(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function load(maxObjects: number) {
+      setIsLoading(true);
       setMaxReached(totalCount > maxObjects);
 
-      if (totalCount === 0) {
-        setObjectsProps([]);
-        return;
-      }
-
-      setIsLoading(true);
       try {
         const allProps: ObjectProperties[] = [];
         for (const sel of selection) {
           const ids = sel.objectRuntimeIds.slice(0, maxObjects - allProps.length);
           if (ids.length === 0) break;
 
+          console.log(`${LOG} Fetching props for model=${sel.modelId}, ids=[${ids.join(",")}]`);
           const batch = await fetchObjectProperties(api, sel.modelId, ids);
+          console.log(`${LOG} Got ${batch.length} results`, batch);
           allProps.push(...batch);
         }
 
-        setObjectsProps(allProps);
-        setAllProperties((prev) => extractProperties(allProps, prev));
+        if (!cancelled) {
+          setObjectsProps(allProps);
+          setAllProperties((prev) => extractProperties(allProps, prev));
+          console.log(`${LOG} Properties loaded: ${allProps.length} objects`);
+        }
       } catch (err) {
-        console.error("[Annotations] Erreur chargement propriétés:", err);
+        console.error(`${LOG} Error loading properties:`, err);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
-    },
-    [api, extractProperties],
-  );
+    }
+
+    load(20);
+
+    return () => { cancelled = true; };
+  }, [api, selection, extractProperties]);
 
   /** Mettre à jour les annotations 3D dans le viewer */
   const refreshAnnotations = useCallback(
-    async (
-      selection: ViewerSelection[],
-      settings: AnnotationSettings,
-    ) => {
+    async (settings: AnnotationSettings) => {
       if (!api) return;
 
-      // Supprimer les anciennes annotations
       await removeAllAnnotations(api, annotatedRef.current);
 
       const enabledProps = allProperties.filter((p) => p.enabled);
@@ -123,6 +137,8 @@ export function useAnnotations(api: TrimbleAPI | null) {
         setAnnotatedObjects([]);
         return;
       }
+
+      console.log(`${LOG} Creating annotations for ${objectsProps.length} objects, ${enabledProps.length} props enabled`);
 
       const newAnnotated: AnnotatedObject[] = [];
 
@@ -133,11 +149,7 @@ export function useAnnotations(api: TrimbleAPI | null) {
         );
         if (limitedIds.length === 0) break;
 
-        const bboxes = await fetchObjectBoundingBoxes(
-          api,
-          sel.modelId,
-          limitedIds,
-        );
+        const bboxes = await fetchObjectBoundingBoxes(api, sel.modelId, limitedIds);
 
         for (const runtimeId of limitedIds) {
           const props = objectsProps.find((p) => p.id === runtimeId);
@@ -145,21 +157,16 @@ export function useAnnotations(api: TrimbleAPI | null) {
           if (!props || !bbox) continue;
 
           const annotated = await createAnnotationsForObject(
-            api,
-            sel.modelId,
-            runtimeId,
-            props,
-            enabledProps,
-            bbox,
-            settings,
+            api, sel.modelId, runtimeId, props, enabledProps, bbox, settings,
           );
           if (annotated) newAnnotated.push(annotated);
         }
       }
 
       setAnnotatedObjects(newAnnotated);
+      console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
     },
-    [api, allProperties, objectsProps],
+    [api, allProperties, objectsProps, selection],
   );
 
   /** Basculer l'état d'une propriété */
@@ -210,7 +217,6 @@ export function useAnnotations(api: TrimbleAPI | null) {
     enabledCount,
     sortMode,
     setSortMode,
-    loadSelection,
     refreshAnnotations,
     toggleProperty,
     toggleAll,
