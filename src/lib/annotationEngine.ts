@@ -42,7 +42,8 @@ function buildAnnotationText(
 
     let found = false;
     for (const pset of obj.properties ?? []) {
-      if (pset.set !== toggle.propertySet) continue;
+      const setName = pset.set ?? "Autres";
+      if (setName !== toggle.propertySet) continue;
       const prop = pset.properties?.find((p) => p.name === toggle.propertyName);
       if (prop) {
         const value = String(prop.value);

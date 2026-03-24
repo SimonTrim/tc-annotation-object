@@ -79,7 +79,13 @@ function normalizeBoundingBoxes(raw: unknown[]): ObjectBoundingBox[] {
   return raw.map((item) => {
     const obj = convertBigInts(item) as Record<string, unknown>;
     const runtimeId = (obj.runtimeId ?? obj.id ?? 0) as number;
-    return { ...obj, runtimeId } as ObjectBoundingBox;
+
+    // L'API TC imbrique min/max dans "boundingBox"
+    const bbox = (obj.boundingBox ?? obj) as Record<string, unknown>;
+    const min = bbox.min as ObjectBoundingBox["min"];
+    const max = bbox.max as ObjectBoundingBox["max"];
+
+    return { runtimeId, min, max };
   });
 }
 
