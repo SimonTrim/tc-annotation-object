@@ -52,15 +52,35 @@ export function useTrimbleConnect(): TrimbleConnectState {
         console.log(`${LOG} Token refreshed (${(data as string)?.length} chars)`);
         setState((s) => ({ ...s, accessToken: data as string }));
         break;
-      case "viewer.selectionChanged": {
-        const sel = (data as ViewerSelection[]) ?? [];
-        const count = sel.reduce((s, v) => s + v.objectRuntimeIds.length, 0);
-        console.log(`${LOG} Selection changed: ${count} objet(s)`, sel);
+
+      // TC envoie "viewer.onSelectionChanged" (pas "viewer.selectionChanged")
+      case "viewer.selectionChanged":
+      case "viewer.onSelectionChanged": {
+        // Le format peut être un tableau direct ou un objet { data: [...] }
+        let sel: ViewerSelection[] = [];
+        if (Array.isArray(data)) {
+          sel = data as ViewerSelection[];
+        } else if (data && typeof data === "object" && "data" in data) {
+          const inner = (data as Record<string, unknown>).data;
+          sel = Array.isArray(inner) ? (inner as ViewerSelection[]) : [];
+        } else if (data && typeof data === "object") {
+          // Possible format: single selection object
+          const obj = data as Record<string, unknown>;
+          if ("modelId" in obj && "objectRuntimeIds" in obj) {
+            sel = [obj as unknown as ViewerSelection];
+          }
+        }
+
+        const count = sel.reduce((s, v) => s + (v.objectRuntimeIds?.length ?? 0), 0);
+        console.log(`${LOG} Selection: ${count} objet(s)`, JSON.stringify(sel));
         setState((s) => ({ ...s, selection: sel }));
         break;
       }
+
       case "viewer.modelLoaded":
-        console.log(`${LOG} Model loaded`, data);
+      case "viewer.onModelLoaded":
+      case "viewer.onModelStateChanged":
+        console.log(`${LOG} Model event`, data);
         break;
     }
   }, []);
