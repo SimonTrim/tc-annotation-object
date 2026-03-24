@@ -14,11 +14,11 @@ import {
 } from "@/lib/viewerBridge";
 import {
   createAnnotationsForObject,
-  removeAllAnnotations,
+  removeMarkupIds,
 } from "@/lib/annotationEngine";
 
 const LOG = "[AnnotationObj]";
-const REFRESH_DEBOUNCE = 400;
+const REFRESH_DEBOUNCE = 500;
 
 export function useAnnotations(
   api: TrimbleAPI | null,
@@ -32,8 +32,9 @@ export function useAnnotations(
   const [maxReached, setMaxReached] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("pset");
 
-  const annotatedRef = useRef<AnnotatedObject[]>([]);
-  annotatedRef.current = annotatedObjects;
+  // Tracker séparé des markup IDs — jamais perdu même si la création échoue partiellement
+  const activeMarkupIdsRef = useRef<number[]>([]);
+
   const propsRef = useRef(properties);
   propsRef.current = properties;
   const objectsPropsRef = useRef(objectsProps);
@@ -43,9 +44,9 @@ export function useAnnotations(
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
-  // Mutex pour empêcher les refreshes concurrents
   const refreshingRef = useRef(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pendingRefreshRef = useRef(false);
 
   const extractProperties = useCallback(
     (propsArray: ObjectProperties[]) => {
@@ -88,6 +89,14 @@ export function useAnnotations(
     [],
   );
 
+  /** Nettoyer tous les markups connus */
+  const cleanupMarkups = useCallback(async () => {
+    if (!api || activeMarkupIdsRef.current.length === 0) return;
+    const ids = [...activeMarkupIdsRef.current];
+    activeMarkupIdsRef.current = [];
+    await removeMarkupIds(api, ids);
+  }, [api]);
+
   /** Charger les propriétés quand la sélection change */
   useEffect(() => {
     const totalCount = selection.reduce(
@@ -101,11 +110,7 @@ export function useAnnotations(
       setObjectsProps([]);
       setProperties([]);
       setMaxReached(false);
-      if (api && annotatedRef.current.length > 0) {
-        removeAllAnnotations(api, annotatedRef.current).then(() => {
-          setAnnotatedObjects([]);
-        });
-      }
+      cleanupMarkups().then(() => setAnnotatedObjects([]));
       return;
     }
 
@@ -142,7 +147,7 @@ export function useAnnotations(
     load();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selection, extractProperties]);
+  }, [api, selection, extractProperties, cleanupMarkups]);
 
   const enabledKey = useMemo(
     () => properties.filter((p) => p.enabled).map((p) => p.key).join("|"),
@@ -151,25 +156,25 @@ export function useAnnotations(
 
   const settingsKey = `${settings.color}|${settings.separator}|${settings.horizontal}|${settings.showUnits}`;
 
-  /** Refresh sérialisé — attend la fin du précédent avant de lancer le suivant */
   const doRefresh = useCallback(async () => {
     if (!api) return;
 
     if (refreshingRef.current) {
-      console.log(`${LOG} Refresh skipped (already running)`);
+      pendingRefreshRef.current = true;
+      console.log(`${LOG} Refresh queued (already running)`);
       return;
     }
     refreshingRef.current = true;
 
     try {
+      // Toujours nettoyer les markups existants d'abord
+      await cleanupMarkups();
+      setAnnotatedObjects([]);
+
       const currentProps = propsRef.current;
       const currentObjProps = objectsPropsRef.current;
       const currentSelection = selectionRef.current;
       const currentSettings = settingsRef.current;
-
-      // Supprimer les anciennes annotations (attend que l'atlas settle)
-      await removeAllAnnotations(api, annotatedRef.current);
-      setAnnotatedObjects([]);
 
       const enabledProps = currentProps.filter((p) => p.enabled);
       if (enabledProps.length === 0 || currentObjProps.length === 0) {
@@ -188,7 +193,6 @@ export function useAnnotations(
         if (limitedIds.length === 0) break;
 
         const bboxes = await fetchObjectBoundingBoxes(api, sel.modelId, limitedIds);
-        console.log(`${LOG} Bounding boxes:`, bboxes);
 
         for (const runtimeId of limitedIds) {
           const props = currentObjProps.find(
@@ -200,34 +204,39 @@ export function useAnnotations(
               || (b as unknown as Record<string, unknown>).id === runtimeId,
           );
 
-          console.log(`${LOG} Match runtimeId=${runtimeId}: props=${!!props}, bbox=${!!bbox}`);
-
           if (!props || !bbox) continue;
 
           const annotated = await createAnnotationsForObject(
             api, sel.modelId, runtimeId, props, enabledProps, bbox, currentSettings,
           );
-          if (annotated) newAnnotated.push(annotated);
+          if (annotated) {
+            newAnnotated.push(annotated);
+            // Tracker immédiatement les IDs créés
+            activeMarkupIdsRef.current.push(...annotated.markupIds);
+          }
         }
       }
 
       setAnnotatedObjects(newAnnotated);
-      console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
+      console.log(`${LOG} Annotations created: ${newAnnotated.length}, tracked ids: [${activeMarkupIdsRef.current}]`);
     } finally {
       refreshingRef.current = false;
-    }
-  }, [api]);
 
-  /** Debounce le refresh pour éviter les appels rapides */
+      // Si un refresh a été demandé pendant l'exécution, le relancer
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        console.log(`${LOG} Running queued refresh`);
+        doRefresh();
+      }
+    }
+  }, [api, cleanupMarkups]);
+
+  /** Debounce le refresh */
   useEffect(() => {
     clearTimeout(refreshTimerRef.current);
 
     if (!enabledKey) {
-      if (api && annotatedRef.current.length > 0) {
-        removeAllAnnotations(api, annotatedRef.current).then(() => {
-          setAnnotatedObjects([]);
-        });
-      }
+      cleanupMarkups().then(() => setAnnotatedObjects([]));
       return;
     }
 
@@ -267,7 +276,6 @@ export function useAnnotations(
     };
 
     return sorted.sort((a, b) => {
-      // Activées toujours en premier
       if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
       return comparator(a, b);
     });

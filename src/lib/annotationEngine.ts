@@ -60,23 +60,12 @@ function buildAnnotationText(
     }
   }
 
-  console.log(`${LOG} buildAnnotationText: ${parts.length} values → "${parts.join(" | ")}"`);
   if (parts.length === 0) return "";
 
   return settings.horizontal ? parts.join(settings.separator) : parts.join("\n");
 }
 
-const ICON_BASE_URL =
-  "data:image/svg+xml;base64," +
-  btoa(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#0063a3"><circle cx="12" cy="12" r="10" fill="#0063a3" stroke="#fff" stroke-width="2"/><text x="12" y="16" text-anchor="middle" fill="#fff" font-size="12" font-family="sans-serif" font-weight="bold">i</text></svg>`);
-
-let iconCounter = 10000;
-
-/**
- * TC viewer ne supporte pas les appels markup en parallèle.
- * Chaque opération (remove, add) doit être séquentielle avec un délai.
- */
-const ATLAS_DELAY = 350;
+const SETTLE_DELAY = 400;
 
 export async function createAnnotationsForObject(
   api: TrimbleAPI,
@@ -129,60 +118,38 @@ export async function createAnnotationsForObject(
     const markupIds = created.map((m) => m.id).filter((id): id is number => id != null);
     console.log(`${LOG} TextMarkup created: ids=[${markupIds}]`);
 
-    await sleep(ATLAS_DELAY);
-
-    const iconId = ++iconCounter;
-    await api.viewer.addIcon({
-      id: iconId,
-      iconPath: ICON_BASE_URL,
-      position: {
-        x: (bbox.min.x + bbox.max.x) / 2,
-        y: (bbox.min.y + bbox.max.y) / 2,
-        z: bbox.max.z + 0.3,
-      },
-      size: 24,
-    });
-
-    console.log(`${LOG} Created annotation: markupIds=[${markupIds}], iconId=${iconId}`);
-    return { modelId, runtimeId, markupIds, iconId, properties: props };
+    return { modelId, runtimeId, markupIds, iconId: -1, properties: props };
   } catch (err) {
     console.error(`${LOG} Error creating annotation for runtimeId=${runtimeId}:`, err);
     return null;
   }
 }
 
+/**
+ * Supprime une liste de markup IDs du viewer.
+ * Attend que le viewer ait fini de processer (atlas settle).
+ */
+export async function removeMarkupIds(
+  api: TrimbleAPI,
+  ids: number[],
+): Promise<void> {
+  if (ids.length === 0) return;
+
+  console.log(`${LOG} Removing markup ids: [${ids}]`);
+  try {
+    await api.markup.removeMarkups(ids);
+  } catch (err) {
+    console.error(`${LOG} Error removing markups:`, err);
+  }
+
+  await sleep(SETTLE_DELAY);
+}
+
+/** @deprecated Use removeMarkupIds instead */
 export async function removeAllAnnotations(
   api: TrimbleAPI,
   annotated: AnnotatedObject[],
 ): Promise<void> {
-  if (annotated.length === 0) return;
-
-  console.log(`${LOG} Removing ${annotated.length} annotations`);
-
-  try {
-    const allMarkupIds = annotated.flatMap((a) => a.markupIds);
-    if (allMarkupIds.length > 0) {
-      await api.markup.removeMarkups(allMarkupIds);
-      await sleep(ATLAS_DELAY);
-    }
-
-    for (const obj of annotated) {
-      try {
-        await api.viewer.removeIcon({
-          id: obj.iconId,
-          iconPath: "",
-          position: { x: 0, y: 0, z: 0 },
-          size: 0,
-        });
-      } catch {
-        // L'icône peut déjà avoir été supprimée
-      }
-    }
-
-    await sleep(ATLAS_DELAY);
-    console.log(`${LOG} Annotations removed`);
-  } catch (err) {
-    console.error(`${LOG} Error removing annotations:`, err);
-    await sleep(ATLAS_DELAY);
-  }
+  const allIds = annotated.flatMap((a) => a.markupIds);
+  await removeMarkupIds(api, allIds);
 }
