@@ -33,7 +33,10 @@ export function useAnnotations(
   const [maxReached, setMaxReached] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("pset");
 
-  const activeMarkupIdsRef = useRef<number[]>([]);
+  // Markup IDs persistés (ne sont JAMAIS supprimés sauf par clearAll)
+  const persistedMarkupIdsRef = useRef<number[]>([]);
+  // Markup IDs de la sélection courante (supprimés/recréés à chaque toggle)
+  const currentMarkupIdsRef = useRef<number[]>([]);
 
   const propsRef = useRef(properties);
   propsRef.current = properties;
@@ -56,7 +59,6 @@ export function useAnnotations(
       const result: PropertyToggleState[] = [];
 
       for (const obj of propsArray) {
-        // Identité — champs spéciaux du product
         if (obj.class) {
           const key = "Identité::Classe IFC";
           if (!seen.has(key)) {
@@ -86,7 +88,6 @@ export function useAnnotations(
           }
         }
 
-        // PropertySets — utiliser le vrai nom du PSet (TC utilise "name" ou "set")
         for (const pset of obj.properties ?? []) {
           const setName = pset.set
             ?? ((pset as unknown as Record<string, unknown>).name as string)
@@ -110,13 +111,16 @@ export function useAnnotations(
     [],
   );
 
-  const cleanupMarkups = useCallback(async () => {
-    if (!api || activeMarkupIdsRef.current.length === 0) return;
-    const ids = [...activeMarkupIdsRef.current];
-    activeMarkupIdsRef.current = [];
-    await removeMarkupIds(api, ids);
-  }, [api]);
+  /** Persister les annotations courantes puis vider le current */
+  const commitCurrentAnnotations = useCallback(() => {
+    if (currentMarkupIdsRef.current.length > 0) {
+      persistedMarkupIdsRef.current.push(...currentMarkupIdsRef.current);
+      currentMarkupIdsRef.current = [];
+      console.log(`${LOG} Committed annotations. Persisted: ${persistedMarkupIdsRef.current.length} markup IDs`);
+    }
+  }, []);
 
+  /** Charger les propriétés quand la sélection change */
   useEffect(() => {
     const totalCount = selection.reduce(
       (sum, s) => sum + s.objectRuntimeIds.length,
@@ -125,12 +129,15 @@ export function useAnnotations(
 
     console.log(`${LOG} Selection effect: ${totalCount} object(s)`);
 
+    // Persister les annotations de la sélection précédente
+    commitCurrentAnnotations();
+
     if (totalCount === 0) {
+      // Désélection : vider le panneau mais NE PAS toucher aux annotations 3D
       setObjectsProps([]);
       setProperties([]);
       setEnabledOrder([]);
       setMaxReached(false);
-      cleanupMarkups().then(() => setAnnotatedObjects([]));
       return;
     }
 
@@ -168,7 +175,7 @@ export function useAnnotations(
     load();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selection, extractProperties, cleanupMarkups]);
+  }, [api, selection, extractProperties, commitCurrentAnnotations]);
 
   const enabledKey = useMemo(
     () => enabledOrder.join("|"),
@@ -188,8 +195,12 @@ export function useAnnotations(
     refreshingRef.current = true;
 
     try {
-      await cleanupMarkups();
-      setAnnotatedObjects([]);
+      // Supprimer uniquement les annotations de la sélection courante
+      if (currentMarkupIdsRef.current.length > 0) {
+        const ids = [...currentMarkupIdsRef.current];
+        currentMarkupIdsRef.current = [];
+        await removeMarkupIds(api, ids);
+      }
 
       const currentOrder = enabledOrderRef.current;
       const currentProps = propsRef.current;
@@ -197,7 +208,6 @@ export function useAnnotations(
       const currentSelection = selectionRef.current;
       const currentSettings = settingsRef.current;
 
-      // Construire la liste ordonnée des propriétés activées
       const orderedEnabled = currentOrder
         .map((key) => currentProps.find((p) => p.key === key))
         .filter((p): p is PropertyToggleState => p != null && p.enabled);
@@ -236,12 +246,12 @@ export function useAnnotations(
           );
           if (annotated) {
             newAnnotated.push(annotated);
-            activeMarkupIdsRef.current.push(...annotated.markupIds);
+            currentMarkupIdsRef.current.push(...annotated.markupIds);
           }
         }
       }
 
-      setAnnotatedObjects(newAnnotated);
+      setAnnotatedObjects((prev) => [...prev, ...newAnnotated]);
       console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
     } finally {
       refreshingRef.current = false;
@@ -252,13 +262,19 @@ export function useAnnotations(
         doRefresh();
       }
     }
-  }, [api, cleanupMarkups]);
+  }, [api]);
 
+  /** Effet de refresh: uniquement si des props sont activées ET qu'il y a une sélection */
   useEffect(() => {
     clearTimeout(refreshTimerRef.current);
 
     if (!enabledKey) {
-      cleanupMarkups().then(() => setAnnotatedObjects([]));
+      // Props désactivées: supprimer uniquement les annotations courantes
+      if (currentMarkupIdsRef.current.length > 0 && api) {
+        const ids = [...currentMarkupIdsRef.current];
+        currentMarkupIdsRef.current = [];
+        removeMarkupIds(api, ids);
+      }
       return;
     }
 
@@ -270,7 +286,22 @@ export function useAnnotations(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabledKey, settingsKey, doRefresh]);
 
-  /** Toggle une propriété on/off et mettre à jour l'ordre */
+  /** Supprimer TOUTES les annotations (persisted + current) */
+  const clearAllAnnotations = useCallback(async () => {
+    if (!api) return;
+
+    const allIds = [...persistedMarkupIdsRef.current, ...currentMarkupIdsRef.current];
+    persistedMarkupIdsRef.current = [];
+    currentMarkupIdsRef.current = [];
+
+    if (allIds.length > 0) {
+      await removeMarkupIds(api, allIds);
+    }
+
+    setAnnotatedObjects([]);
+    console.log(`${LOG} All annotations cleared`);
+  }, [api]);
+
   const toggleProperty = useCallback((key: string) => {
     setProperties((prev) =>
       prev.map((p) => (p.key === key ? { ...p, enabled: !p.enabled } : p)),
@@ -298,22 +329,18 @@ export function useAnnotations(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [properties]);
 
-  /** Déplacer une propriété dans l'ordre (haut/bas) */
   const moveProperty = useCallback((key: string, direction: "up" | "down") => {
     setEnabledOrder((prev) => {
       const idx = prev.indexOf(key);
       if (idx === -1) return prev;
-
       const targetIdx = direction === "up" ? idx - 1 : idx + 1;
       if (targetIdx < 0 || targetIdx >= prev.length) return prev;
-
       const next = [...prev];
       [next[idx], next[targetIdx]] = [next[targetIdx]!, next[idx]!];
       return next;
     });
   }, []);
 
-  /** Drag & drop: déplacer de fromIndex à toIndex */
   const reorderProperty = useCallback((fromIndex: number, toIndex: number) => {
     setEnabledOrder((prev) => {
       if (fromIndex === toIndex) return prev;
@@ -324,10 +351,8 @@ export function useAnnotations(
     });
   }, []);
 
-  /** Propriétés triées par groupe pour la liste principale */
   const sortedProperties = useMemo(() => {
     const sorted = [...properties];
-
     const comparator = (a: PropertyToggleState, b: PropertyToggleState) => {
       switch (sortMode) {
         case "alpha-asc":
@@ -340,7 +365,6 @@ export function useAnnotations(
             || a.propertyName.localeCompare(b.propertyName);
       }
     };
-
     return sorted.sort(comparator);
   }, [properties, sortMode]);
 
@@ -356,7 +380,6 @@ export function useAnnotations(
     );
   }, [sortedProperties]);
 
-  /** Propriétés activées dans l'ordre personnalisé */
   const orderedEnabledProps = useMemo(() => {
     return enabledOrder
       .map((key) => properties.find((p) => p.key === key))
@@ -364,6 +387,8 @@ export function useAnnotations(
   }, [enabledOrder, properties]);
 
   const enabledCount = orderedEnabledProps.length;
+
+  const totalAnnotations = annotatedObjects.length;
 
   return {
     allProperties: sortedProperties,
@@ -374,11 +399,13 @@ export function useAnnotations(
     isLoading,
     maxReached,
     enabledCount,
+    totalAnnotations,
     sortMode,
     setSortMode,
     toggleProperty,
     toggleAll,
     moveProperty,
     reorderProperty,
+    clearAllAnnotations,
   };
 }
