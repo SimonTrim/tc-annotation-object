@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import {
   ArrowUpAZ,
   ArrowDownAZ,
@@ -15,7 +15,8 @@ import { PropertyToggleList } from "@/components/PropertyToggleList";
 import { EnabledPropertyOrder } from "@/components/EnabledPropertyOrder";
 import { Loader } from "@/components/Loader";
 import { useTrimbleContext } from "@/hooks/useTrimbleConnect";
-import type { AnnotationSettings, SortMode } from "@/types";
+import { useFavorites } from "@/hooks/useFavorites";
+import type { AnnotationSettings, PropertyToggleState, SortMode } from "@/types";
 import type { useAnnotations } from "@/hooks/useAnnotations";
 
 interface InquireObjectsTabProps {
@@ -25,6 +26,7 @@ interface InquireObjectsTabProps {
 
 export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabProps) {
   const { selection } = useTrimbleContext();
+  const { favorites, toggleFavorite } = useFavorites();
   const {
     allProperties,
     groupedProperties,
@@ -39,6 +41,28 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
     moveProperty,
     reorderProperty,
   } = annotations;
+
+  /** Regrouper avec "Favoris" en haut */
+  const groupedWithFavorites = useMemo(() => {
+    const result: Record<string, PropertyToggleState[]> = {};
+
+    // Favoris en premier
+    const favProps = Object.values(groupedProperties)
+      .flat()
+      .filter((p) => favorites.has(p.key));
+    if (favProps.length > 0) {
+      result["Favoris"] = favProps;
+    }
+
+    // Puis les groupes normaux (sans les favoris)
+    for (const [group, props] of Object.entries(groupedProperties)) {
+      const nonFav = props.filter((p) => !favorites.has(p.key));
+      if (nonFav.length > 0) {
+        result[group] = nonFav;
+      }
+    }
+    return result;
+  }, [groupedProperties, favorites]);
 
   const handleSortCycle = useCallback(() => {
     const modes: SortMode[] = ["pset", "alpha-asc", "alpha-desc"];
@@ -130,8 +154,10 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
         <ScrollArea className="flex-1">
           <div className="py-1">
             <PropertyToggleList
-              groupedProperties={groupedProperties}
+              groupedProperties={groupedWithFavorites}
+              favorites={favorites}
               onToggle={toggleProperty}
+              onToggleFavorite={toggleFavorite}
             />
           </div>
         </ScrollArea>
