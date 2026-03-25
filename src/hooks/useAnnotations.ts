@@ -86,9 +86,11 @@ export function useAnnotations(
           }
         }
 
-        // PropertySets — utiliser le vrai nom du PSet
+        // PropertySets — utiliser le vrai nom du PSet (TC utilise "name" ou "set")
         for (const pset of obj.properties ?? []) {
-          const setName = pset.set ?? "Autres";
+          const setName = pset.set
+            ?? ((pset as unknown as Record<string, unknown>).name as string)
+            ?? "Autres";
           for (const prop of pset.properties ?? []) {
             const key = `${setName}::${prop.name}`;
             if (!seen.has(key)) {
