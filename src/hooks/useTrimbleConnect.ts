@@ -73,7 +73,22 @@ export function useTrimbleConnect(): TrimbleConnectState {
 
         const count = sel.reduce((s, v) => s + (v.objectRuntimeIds?.length ?? 0), 0);
         console.log(`${LOG} Selection: ${count} objet(s)`, JSON.stringify(sel));
-        setState((s) => ({ ...s, selection: sel }));
+
+        // Ne mettre à jour le state que si la sélection a réellement changé
+        setState((s) => {
+          const prevKey = s.selection
+            .map((v) => `${v.modelId}:${v.objectRuntimeIds.join(",")}`)
+            .join("|");
+          const newKey = sel
+            .map((v) => `${v.modelId}:${v.objectRuntimeIds.join(",")}`)
+            .join("|");
+
+          if (prevKey === newKey) {
+            console.log(`${LOG} Selection unchanged, skipping state update`);
+            return s;
+          }
+          return { ...s, selection: sel };
+        });
         break;
       }
 
