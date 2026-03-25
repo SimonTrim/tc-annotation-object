@@ -5,7 +5,6 @@ import type {
   ObjectProperties,
   PropertyToggleState,
   AnnotationSettings,
-  AnnotatedObject,
   SortMode,
 } from "@/types";
 import {
@@ -28,15 +27,13 @@ export function useAnnotations(
   const [properties, setProperties] = useState<PropertyToggleState[]>([]);
   const [enabledOrder, setEnabledOrder] = useState<string[]>([]);
   const [objectsProps, setObjectsProps] = useState<ObjectProperties[]>([]);
-  const [annotatedObjects, setAnnotatedObjects] = useState<AnnotatedObject[]>([]);
+  const [totalAnnotations, setTotalAnnotations] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [maxReached, setMaxReached] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("pset");
 
-  // Markup IDs persistés (ne sont JAMAIS supprimés sauf par clearAll)
-  const persistedMarkupIdsRef = useRef<number[]>([]);
-  // Markup IDs de la sélection courante (supprimés/recréés à chaque toggle)
-  const currentMarkupIdsRef = useRef<number[]>([]);
+  // Suivi des annotations par objet : "modelId:runtimeId" → markup IDs
+  const markupMapRef = useRef<Map<string, number[]>>(new Map());
 
   const propsRef = useRef(properties);
   propsRef.current = properties;
@@ -54,7 +51,7 @@ export function useAnnotations(
   const pendingRefreshRef = useRef(false);
 
   const extractProperties = useCallback(
-    (propsArray: ObjectProperties[]) => {
+    (propsArray: ObjectProperties[], currentOrder: Set<string>) => {
       const seen = new Set<string>();
       const result: PropertyToggleState[] = [];
 
@@ -63,28 +60,28 @@ export function useAnnotations(
           const key = "Identité::Classe IFC";
           if (!seen.has(key)) {
             seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Classe IFC", enabled: false });
+            result.push({ key, propertySet: "Identité", propertyName: "Classe IFC", enabled: currentOrder.has(key) });
           }
         }
         if (obj.product?.name) {
           const key = "Identité::Nom";
           if (!seen.has(key)) {
             seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Nom", enabled: false });
+            result.push({ key, propertySet: "Identité", propertyName: "Nom", enabled: currentOrder.has(key) });
           }
         }
         if (obj.product?.objectType) {
           const key = "Identité::Type d'objet";
           if (!seen.has(key)) {
             seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Type d'objet", enabled: false });
+            result.push({ key, propertySet: "Identité", propertyName: "Type d'objet", enabled: currentOrder.has(key) });
           }
         }
         if (obj.product?.description) {
           const key = "Identité::Description";
           if (!seen.has(key)) {
             seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Description", enabled: false });
+            result.push({ key, propertySet: "Identité", propertyName: "Description", enabled: currentOrder.has(key) });
           }
         }
 
@@ -100,7 +97,7 @@ export function useAnnotations(
                 key,
                 propertySet: setName,
                 propertyName: prop.name,
-                enabled: false,
+                enabled: currentOrder.has(key),
               });
             }
           }
@@ -111,16 +108,6 @@ export function useAnnotations(
     [],
   );
 
-  /** Persister les annotations courantes puis vider le current */
-  const commitCurrentAnnotations = useCallback(() => {
-    if (currentMarkupIdsRef.current.length > 0) {
-      persistedMarkupIdsRef.current.push(...currentMarkupIdsRef.current);
-      currentMarkupIdsRef.current = [];
-      console.log(`${LOG} Committed annotations. Persisted: ${persistedMarkupIdsRef.current.length} markup IDs`);
-    }
-  }, []);
-
-  /** Charger les propriétés quand la sélection change */
   useEffect(() => {
     const totalCount = selection.reduce(
       (sum, s) => sum + s.objectRuntimeIds.length,
@@ -129,14 +116,9 @@ export function useAnnotations(
 
     console.log(`${LOG} Selection effect: ${totalCount} object(s)`);
 
-    // Persister les annotations de la sélection précédente
-    commitCurrentAnnotations();
-
     if (totalCount === 0) {
-      // Désélection : vider le panneau mais NE PAS toucher aux annotations 3D
       setObjectsProps([]);
       setProperties([]);
-      setEnabledOrder([]);
       setMaxReached(false);
       return;
     }
@@ -161,9 +143,9 @@ export function useAnnotations(
 
         if (!cancelled) {
           setObjectsProps(allProps);
-          setProperties(extractProperties(allProps));
-          setEnabledOrder([]);
-          console.log(`${LOG} Properties loaded: ${allProps.length} objects`);
+          const currentOrder = new Set(enabledOrderRef.current);
+          setProperties(extractProperties(allProps, currentOrder));
+          console.log(`${LOG} Properties loaded: ${allProps.length} objects, preserved ${currentOrder.size} enabled keys`);
         }
       } catch (err) {
         console.error(`${LOG} Error loading properties:`, err);
@@ -175,7 +157,7 @@ export function useAnnotations(
     load();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selection, extractProperties, commitCurrentAnnotations]);
+  }, [api, selection, extractProperties]);
 
   const enabledKey = useMemo(
     () => enabledOrder.join("|"),
@@ -195,13 +177,6 @@ export function useAnnotations(
     refreshingRef.current = true;
 
     try {
-      // Supprimer uniquement les annotations de la sélection courante
-      if (currentMarkupIdsRef.current.length > 0) {
-        const ids = [...currentMarkupIdsRef.current];
-        currentMarkupIdsRef.current = [];
-        await removeMarkupIds(api, ids);
-      }
-
       const currentOrder = enabledOrderRef.current;
       const currentProps = propsRef.current;
       const currentObjProps = objectsPropsRef.current;
@@ -212,20 +187,40 @@ export function useAnnotations(
         .map((key) => currentProps.find((p) => p.key === key))
         .filter((p): p is PropertyToggleState => p != null && p.enabled);
 
+      // Si aucune propriété activée ou aucun objet, supprimer les annotations des objets sélectionnés
       if (orderedEnabled.length === 0 || currentObjProps.length === 0) {
+        for (const sel of currentSelection) {
+          for (const runtimeId of sel.objectRuntimeIds) {
+            const objKey = `${sel.modelId}:${runtimeId}`;
+            const ids = markupMapRef.current.get(objKey);
+            if (ids && ids.length > 0) {
+              await removeMarkupIds(api, ids);
+              markupMapRef.current.delete(objKey);
+            }
+          }
+        }
+        setTotalAnnotations(markupMapRef.current.size);
         return;
       }
 
       console.log(`${LOG} Creating annotations: ${currentObjProps.length} objects, ${orderedEnabled.length} props`);
 
-      const newAnnotated: AnnotatedObject[] = [];
-
       for (const sel of currentSelection) {
         const limitedIds = sel.objectRuntimeIds.slice(
           0,
-          currentSettings.maxObjects - newAnnotated.length,
+          currentSettings.maxObjects,
         );
         if (limitedIds.length === 0) break;
+
+        // Supprimer les annotations existantes pour ces objets avant d'en créer de nouvelles
+        for (const runtimeId of limitedIds) {
+          const objKey = `${sel.modelId}:${runtimeId}`;
+          const existingIds = markupMapRef.current.get(objKey);
+          if (existingIds && existingIds.length > 0) {
+            await removeMarkupIds(api, existingIds);
+            markupMapRef.current.delete(objKey);
+          }
+        }
 
         const bboxes = await fetchObjectBoundingBoxes(api, sel.modelId, limitedIds);
 
@@ -245,14 +240,14 @@ export function useAnnotations(
             api, sel.modelId, runtimeId, props, orderedEnabled, bbox, currentSettings,
           );
           if (annotated) {
-            newAnnotated.push(annotated);
-            currentMarkupIdsRef.current.push(...annotated.markupIds);
+            const objKey = `${sel.modelId}:${runtimeId}`;
+            markupMapRef.current.set(objKey, annotated.markupIds);
           }
         }
       }
 
-      setAnnotatedObjects((prev) => [...prev, ...newAnnotated]);
-      console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
+      setTotalAnnotations(markupMapRef.current.size);
+      console.log(`${LOG} Annotations: ${markupMapRef.current.size} objects annotated`);
     } finally {
       refreshingRef.current = false;
 
@@ -264,16 +259,29 @@ export function useAnnotations(
     }
   }, [api]);
 
-  /** Effet de refresh: uniquement si des props sont activées ET qu'il y a une sélection */
   useEffect(() => {
     clearTimeout(refreshTimerRef.current);
 
     if (!enabledKey) {
-      // Props désactivées: supprimer uniquement les annotations courantes
-      if (currentMarkupIdsRef.current.length > 0 && api) {
-        const ids = [...currentMarkupIdsRef.current];
-        currentMarkupIdsRef.current = [];
-        removeMarkupIds(api, ids);
+      // Toutes les propriétés désactivées : supprimer les annotations des objets actuellement sélectionnés
+      if (api) {
+        const currentSelection = selectionRef.current;
+        const idsToRemove: number[] = [];
+        for (const sel of currentSelection) {
+          for (const runtimeId of sel.objectRuntimeIds) {
+            const objKey = `${sel.modelId}:${runtimeId}`;
+            const ids = markupMapRef.current.get(objKey);
+            if (ids) {
+              idsToRemove.push(...ids);
+              markupMapRef.current.delete(objKey);
+            }
+          }
+        }
+        if (idsToRemove.length > 0) {
+          removeMarkupIds(api, idsToRemove).then(() => {
+            setTotalAnnotations(markupMapRef.current.size);
+          });
+        }
       }
       return;
     }
@@ -284,21 +292,22 @@ export function useAnnotations(
 
     return () => clearTimeout(refreshTimerRef.current);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabledKey, settingsKey, doRefresh]);
+  }, [enabledKey, settingsKey, doRefresh, api]);
 
-  /** Supprimer TOUTES les annotations (persisted + current) */
+  /** Supprimer TOUTES les annotations */
   const clearAllAnnotations = useCallback(async () => {
     if (!api) return;
 
-    const allIds = [...persistedMarkupIdsRef.current, ...currentMarkupIdsRef.current];
-    persistedMarkupIdsRef.current = [];
-    currentMarkupIdsRef.current = [];
+    const allIds = Array.from(markupMapRef.current.values()).flat();
+    markupMapRef.current.clear();
 
     if (allIds.length > 0) {
       await removeMarkupIds(api, allIds);
     }
 
-    setAnnotatedObjects([]);
+    setTotalAnnotations(0);
+    setProperties((prev) => prev.map((p) => ({ ...p, enabled: false })));
+    setEnabledOrder([]);
     console.log(`${LOG} All annotations cleared`);
   }, [api]);
 
@@ -388,14 +397,11 @@ export function useAnnotations(
 
   const enabledCount = orderedEnabledProps.length;
 
-  const totalAnnotations = annotatedObjects.length;
-
   return {
     allProperties: sortedProperties,
     groupedProperties,
     orderedEnabledProps,
     objectsProps,
-    annotatedObjects,
     isLoading,
     maxReached,
     enabledCount,
