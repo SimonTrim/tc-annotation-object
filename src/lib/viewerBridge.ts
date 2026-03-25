@@ -105,7 +105,28 @@ export async function fetchObjectProperties(
     const batch = runtimeIds.slice(i, i + BATCH_SIZE);
     try {
       const props = await api.viewer.getObjectProperties(modelId, batch);
-      console.log(`${LOG} Raw props response:`, safeStringify(props));
+      console.log(`${LOG} Raw props response:`, safeStringify(props, 800));
+
+      // Diagnostic: afficher la structure des PSets
+      for (const p of props as unknown[]) {
+        const obj = p as Record<string, unknown>;
+        const psets = obj.properties as unknown[] | undefined;
+        if (psets) {
+          const summary = psets.map((ps) => {
+            const psObj = ps as Record<string, unknown>;
+            const innerProps = psObj.properties as unknown[] | undefined;
+            return {
+              set: psObj.set ?? psObj.name ?? "(null)",
+              count: innerProps?.length ?? 0,
+              names: (innerProps ?? []).slice(0, 5).map((pr) => (pr as Record<string, unknown>).name),
+            };
+          });
+          console.log(`${LOG} PSet structure for id=${obj.id}:`, safeStringify(summary, 2000));
+        } else {
+          console.log(`${LOG} No properties array for id=${obj.id}, keys:`, Object.keys(obj));
+        }
+      }
+
       const normalized = normalizeObjectProperties(props as unknown[]);
       console.log(`${LOG} Normalized ${normalized.length} properties, ids=[${normalized.map((p) => p.id).join(",")}]`);
       results.push(...normalized);
