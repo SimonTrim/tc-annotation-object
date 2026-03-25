@@ -26,17 +26,19 @@ export function useAnnotations(
   settings: AnnotationSettings,
 ) {
   const [properties, setProperties] = useState<PropertyToggleState[]>([]);
+  const [enabledOrder, setEnabledOrder] = useState<string[]>([]);
   const [objectsProps, setObjectsProps] = useState<ObjectProperties[]>([]);
   const [annotatedObjects, setAnnotatedObjects] = useState<AnnotatedObject[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [maxReached, setMaxReached] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("pset");
 
-  // Tracker séparé des markup IDs — jamais perdu même si la création échoue partiellement
   const activeMarkupIdsRef = useRef<number[]>([]);
 
   const propsRef = useRef(properties);
   propsRef.current = properties;
+  const enabledOrderRef = useRef(enabledOrder);
+  enabledOrderRef.current = enabledOrder;
   const objectsPropsRef = useRef(objectsProps);
   objectsPropsRef.current = objectsProps;
   const selectionRef = useRef(selection);
@@ -54,6 +56,7 @@ export function useAnnotations(
       const result: PropertyToggleState[] = [];
 
       for (const obj of propsArray) {
+        // Identité — champs spéciaux du product
         if (obj.class) {
           const key = "Identité::Classe IFC";
           if (!seen.has(key)) {
@@ -68,6 +71,22 @@ export function useAnnotations(
             result.push({ key, propertySet: "Identité", propertyName: "Nom", enabled: false });
           }
         }
+        if (obj.product?.objectType) {
+          const key = "Identité::Type d'objet";
+          if (!seen.has(key)) {
+            seen.add(key);
+            result.push({ key, propertySet: "Identité", propertyName: "Type d'objet", enabled: false });
+          }
+        }
+        if (obj.product?.description) {
+          const key = "Identité::Description";
+          if (!seen.has(key)) {
+            seen.add(key);
+            result.push({ key, propertySet: "Identité", propertyName: "Description", enabled: false });
+          }
+        }
+
+        // PropertySets — utiliser le vrai nom du PSet
         for (const pset of obj.properties ?? []) {
           const setName = pset.set ?? "Autres";
           for (const prop of pset.properties ?? []) {
@@ -89,7 +108,6 @@ export function useAnnotations(
     [],
   );
 
-  /** Nettoyer tous les markups connus */
   const cleanupMarkups = useCallback(async () => {
     if (!api || activeMarkupIdsRef.current.length === 0) return;
     const ids = [...activeMarkupIdsRef.current];
@@ -97,7 +115,6 @@ export function useAnnotations(
     await removeMarkupIds(api, ids);
   }, [api]);
 
-  /** Charger les propriétés quand la sélection change */
   useEffect(() => {
     const totalCount = selection.reduce(
       (sum, s) => sum + s.objectRuntimeIds.length,
@@ -109,6 +126,7 @@ export function useAnnotations(
     if (totalCount === 0) {
       setObjectsProps([]);
       setProperties([]);
+      setEnabledOrder([]);
       setMaxReached(false);
       cleanupMarkups().then(() => setAnnotatedObjects([]));
       return;
@@ -135,6 +153,7 @@ export function useAnnotations(
         if (!cancelled) {
           setObjectsProps(allProps);
           setProperties(extractProperties(allProps));
+          setEnabledOrder([]);
           console.log(`${LOG} Properties loaded: ${allProps.length} objects`);
         }
       } catch (err) {
@@ -150,8 +169,8 @@ export function useAnnotations(
   }, [api, selection, extractProperties, cleanupMarkups]);
 
   const enabledKey = useMemo(
-    () => properties.filter((p) => p.enabled).map((p) => p.key).join("|"),
-    [properties],
+    () => enabledOrder.join("|"),
+    [enabledOrder],
   );
 
   const settingsKey = `${settings.color}|${settings.separator}|${settings.horizontal}|${settings.showUnits}`;
@@ -167,21 +186,25 @@ export function useAnnotations(
     refreshingRef.current = true;
 
     try {
-      // Toujours nettoyer les markups existants d'abord
       await cleanupMarkups();
       setAnnotatedObjects([]);
 
+      const currentOrder = enabledOrderRef.current;
       const currentProps = propsRef.current;
       const currentObjProps = objectsPropsRef.current;
       const currentSelection = selectionRef.current;
       const currentSettings = settingsRef.current;
 
-      const enabledProps = currentProps.filter((p) => p.enabled);
-      if (enabledProps.length === 0 || currentObjProps.length === 0) {
+      // Construire la liste ordonnée des propriétés activées
+      const orderedEnabled = currentOrder
+        .map((key) => currentProps.find((p) => p.key === key))
+        .filter((p): p is PropertyToggleState => p != null && p.enabled);
+
+      if (orderedEnabled.length === 0 || currentObjProps.length === 0) {
         return;
       }
 
-      console.log(`${LOG} Creating annotations: ${currentObjProps.length} objects, ${enabledProps.length} props`);
+      console.log(`${LOG} Creating annotations: ${currentObjProps.length} objects, ${orderedEnabled.length} props`);
 
       const newAnnotated: AnnotatedObject[] = [];
 
@@ -207,22 +230,20 @@ export function useAnnotations(
           if (!props || !bbox) continue;
 
           const annotated = await createAnnotationsForObject(
-            api, sel.modelId, runtimeId, props, enabledProps, bbox, currentSettings,
+            api, sel.modelId, runtimeId, props, orderedEnabled, bbox, currentSettings,
           );
           if (annotated) {
             newAnnotated.push(annotated);
-            // Tracker immédiatement les IDs créés
             activeMarkupIdsRef.current.push(...annotated.markupIds);
           }
         }
       }
 
       setAnnotatedObjects(newAnnotated);
-      console.log(`${LOG} Annotations created: ${newAnnotated.length}, tracked ids: [${activeMarkupIdsRef.current}]`);
+      console.log(`${LOG} Annotations created: ${newAnnotated.length}`);
     } finally {
       refreshingRef.current = false;
 
-      // Si un refresh a été demandé pendant l'exécution, le relancer
       if (pendingRefreshRef.current) {
         pendingRefreshRef.current = false;
         console.log(`${LOG} Running queued refresh`);
@@ -231,7 +252,6 @@ export function useAnnotations(
     }
   }, [api, cleanupMarkups]);
 
-  /** Debounce le refresh */
   useEffect(() => {
     clearTimeout(refreshTimerRef.current);
 
@@ -248,17 +268,61 @@ export function useAnnotations(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabledKey, settingsKey, doRefresh]);
 
+  /** Toggle une propriété on/off et mettre à jour l'ordre */
   const toggleProperty = useCallback((key: string) => {
     setProperties((prev) =>
       prev.map((p) => (p.key === key ? { ...p, enabled: !p.enabled } : p)),
     );
+    setEnabledOrder((prev) => {
+      if (prev.includes(key)) {
+        return prev.filter((k) => k !== key);
+      }
+      return [...prev, key];
+    });
   }, []);
 
   const toggleAll = useCallback((enabled: boolean) => {
     setProperties((prev) => prev.map((p) => ({ ...p, enabled })));
+    if (enabled) {
+      setEnabledOrder((prev) => {
+        const allKeys = properties.map((p) => p.key);
+        const existing = new Set(prev);
+        const newKeys = allKeys.filter((k) => !existing.has(k));
+        return [...prev, ...newKeys];
+      });
+    } else {
+      setEnabledOrder([]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [properties]);
+
+  /** Déplacer une propriété dans l'ordre (haut/bas) */
+  const moveProperty = useCallback((key: string, direction: "up" | "down") => {
+    setEnabledOrder((prev) => {
+      const idx = prev.indexOf(key);
+      if (idx === -1) return prev;
+
+      const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+
+      const next = [...prev];
+      [next[idx], next[targetIdx]] = [next[targetIdx]!, next[idx]!];
+      return next;
+    });
   }, []);
 
-  /** Propriétés triées : activées en haut, puis par mode de tri */
+  /** Drag & drop: déplacer de fromIndex à toIndex */
+  const reorderProperty = useCallback((fromIndex: number, toIndex: number) => {
+    setEnabledOrder((prev) => {
+      if (fromIndex === toIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved!);
+      return next;
+    });
+  }, []);
+
+  /** Propriétés triées par groupe pour la liste principale */
   const sortedProperties = useMemo(() => {
     const sorted = [...properties];
 
@@ -275,10 +339,7 @@ export function useAnnotations(
       }
     };
 
-    return sorted.sort((a, b) => {
-      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-      return comparator(a, b);
-    });
+    return sorted.sort(comparator);
   }, [properties, sortMode]);
 
   const groupedProperties = useMemo(() => {
@@ -293,14 +354,19 @@ export function useAnnotations(
     );
   }, [sortedProperties]);
 
-  const enabledCount = useMemo(
-    () => properties.filter((p) => p.enabled).length,
-    [properties],
-  );
+  /** Propriétés activées dans l'ordre personnalisé */
+  const orderedEnabledProps = useMemo(() => {
+    return enabledOrder
+      .map((key) => properties.find((p) => p.key === key))
+      .filter((p): p is PropertyToggleState => p != null && p.enabled);
+  }, [enabledOrder, properties]);
+
+  const enabledCount = orderedEnabledProps.length;
 
   return {
     allProperties: sortedProperties,
     groupedProperties,
+    orderedEnabledProps,
     objectsProps,
     annotatedObjects,
     isLoading,
@@ -310,5 +376,7 @@ export function useAnnotations(
     setSortMode,
     toggleProperty,
     toggleAll,
+    moveProperty,
+    reorderProperty,
   };
 }

@@ -31,14 +31,20 @@ function buildAnnotationText(
   const parts: string[] = [];
 
   for (const toggle of enabledProps) {
-    if (!toggle.enabled) continue;
-
     if (toggle.key === "Identité::Classe IFC" && obj.class) {
       parts.push(obj.class);
       continue;
     }
     if (toggle.key === "Identité::Nom" && obj.product?.name) {
       parts.push(obj.product.name);
+      continue;
+    }
+    if (toggle.key === "Identité::Type d'objet" && obj.product?.objectType) {
+      parts.push(obj.product.objectType);
+      continue;
+    }
+    if (toggle.key === "Identité::Description" && obj.product?.description) {
+      parts.push(obj.product.description);
       continue;
     }
 

@@ -7,13 +7,12 @@ import {
   ToggleLeft,
   ToggleRight,
   AlertCircle,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { PropertyToggleList } from "@/components/PropertyToggleList";
+import { EnabledPropertyOrder } from "@/components/EnabledPropertyOrder";
 import { Loader } from "@/components/Loader";
 import { useTrimbleContext } from "@/hooks/useTrimbleConnect";
 import type { AnnotationSettings, SortMode } from "@/types";
@@ -29,6 +28,7 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
   const {
     allProperties,
     groupedProperties,
+    orderedEnabledProps,
     isLoading,
     maxReached,
     enabledCount,
@@ -36,9 +36,9 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
     setSortMode,
     toggleProperty,
     toggleAll,
+    moveProperty,
+    reorderProperty,
   } = annotations;
-
-  const enabledProps = allProperties.filter((p) => p.enabled);
 
   const handleSortCycle = useCallback(() => {
     const modes: SortMode[] = ["pset", "alpha-asc", "alpha-desc"];
@@ -56,27 +56,20 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
 
   return (
     <div className="flex flex-col h-full">
-      {/* Barre de propriétés actives */}
+      {/* Section des propriétés activées (réordonnables) */}
       <div className="px-3 pt-2 pb-1">
-        <div className="flex items-center gap-1.5 flex-wrap min-h-[28px]">
-          {enabledProps.length > 0 ? (
-            enabledProps.map((p) => (
-              <Badge
-                key={p.key}
-                variant="default"
-                className="text-[10px] gap-1 pr-1 cursor-pointer"
-                onClick={() => toggleProperty(p.key)}
-              >
-                {p.propertyName}
-                <X className="h-2.5 w-2.5" />
-              </Badge>
-            ))
-          ) : (
-            <span className="text-[11px] text-muted-foreground italic">
-              Aucune propriété activée
-            </span>
-          )}
-        </div>
+        {enabledCount > 0 ? (
+          <EnabledPropertyOrder
+            items={orderedEnabledProps}
+            onRemove={toggleProperty}
+            onMove={moveProperty}
+            onReorder={reorderProperty}
+          />
+        ) : (
+          <span className="text-[11px] text-muted-foreground italic">
+            Aucune propriété activée
+          </span>
+        )}
       </div>
 
       {/* Barre d'outils */}
@@ -130,7 +123,7 @@ export function InquireObjectsTab({ settings, annotations }: InquireObjectsTabPr
 
       <Separator />
 
-      {/* Liste des propriétés */}
+      {/* Liste des propriétés groupées */}
       {isLoading ? (
         <Loader message="Chargement des propriétés…" />
       ) : (
