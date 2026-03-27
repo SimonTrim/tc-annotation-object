@@ -10,7 +10,7 @@ import type {
 const LOG = "[ViewerBridge]";
 const BATCH_SIZE = 50;
 
-// ── Region → PSet API URL ──
+// ── Region → API URLs ──
 
 const REGION_PSET_URLS: Record<string, string> = {
   europe: "https://pset-api.eu-west-1.connect.trimble.com/v1",
@@ -18,6 +18,15 @@ const REGION_PSET_URLS: Record<string, string> = {
   asia: "https://pset-api.ap-southeast-1.connect.trimble.com/v1",
   australia: "https://pset-api.ap-southeast-2.connect.trimble.com/v1",
 };
+
+const REGION_TC_API_URLS: Record<string, string> = {
+  europe: "https://app21.connect.trimble.com/tc/api/2.0",
+  northAmerica: "https://app.connect.trimble.com/tc/api/2.0",
+  asia: "https://app31.connect.trimble.com/tc/api/2.0",
+  australia: "https://app32.connect.trimble.com/tc/api/2.0",
+};
+
+let cachedProjectUuid: string | null = null;
 
 // ── Safe JSON (BigInt → Number) ──
 
@@ -204,6 +213,41 @@ async function proxyFetch(
   });
 }
 
+// ── REST API: Resolve project UUID from short ID ──
+
+async function resolveProjectUuid(
+  project: ConnectProject,
+  token: string,
+): Promise<string | null> {
+  if (cachedProjectUuid) return cachedProjectUuid;
+
+  const tcBaseUrl = REGION_TC_API_URLS[project.location] ?? REGION_TC_API_URLS.europe!;
+  const url = `${tcBaseUrl}/projects/${project.id}`;
+  console.log(`${LOG} Resolving project UUID: ${url}`);
+
+  try {
+    const resp = await proxyFetch(url, token);
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      console.warn(`${LOG} Project resolve HTTP ${resp.status}: ${body.slice(0, 200)}`);
+      return null;
+    }
+
+    const data = (await resp.json()) as Record<string, unknown>;
+    const uuid = (data.id ?? data.uuid ?? data.projectId) as string | undefined;
+    console.log(`${LOG} Project UUID resolved: ${uuid}`);
+
+    if (uuid) {
+      cachedProjectUuid = uuid;
+      return uuid;
+    }
+    return null;
+  } catch (err) {
+    console.error(`${LOG} resolveProjectUuid failed:`, err);
+    return null;
+  }
+}
+
 // ── REST API: Service PSet (custom properties) ──
 
 export async function fetchServicePsets(
@@ -215,9 +259,16 @@ export async function fetchServicePsets(
 
   if (objectGuids.length === 0) return [];
 
+  // Resolve the project UUID (PSet API needs UUID, not short ID)
+  const projectUuid = await resolveProjectUuid(project, token);
+  if (!projectUuid) {
+    console.warn(`${LOG} Cannot resolve project UUID, skipping service psets`);
+    return [];
+  }
+
   try {
     // Step 1: Get pset definitions for the project
-    const defsUrl = `${baseUrl}/projects/${project.id}/defs`;
+    const defsUrl = `${baseUrl}/projects/${projectUuid}/defs`;
     console.log(`${LOG} Fetching PSet defs: ${defsUrl}`);
     const defsResp = await proxyFetch(defsUrl, token);
 
@@ -243,7 +294,7 @@ export async function fetchServicePsets(
 
     for (const def of defs) {
       try {
-        const instUrl = `${baseUrl}/projects/${project.id}/defs/${def.id}/instances`;
+        const instUrl = `${baseUrl}/projects/${projectUuid}/defs/${def.id}/instances`;
         const instResp = await proxyFetch(instUrl, token);
 
         if (!instResp.ok) {
