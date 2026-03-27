@@ -26,7 +26,13 @@ const REGION_TC_API_URLS: Record<string, string> = {
   australia: "https://app32.connect.trimble.com/tc/api/2.0",
 };
 
-// Region name → PSet API region code (for FRN links)
+const REGION_ORG_URLS: Record<string, string> = {
+  europe: "https://org-api.eu-west-1.connect.trimble.com/v1",
+  northAmerica: "https://org-api.us-east-1.connect.trimble.com/v1",
+  asia: "https://org-api.ap-southeast-1.connect.trimble.com/v1",
+  australia: "https://org-api.ap-southeast-2.connect.trimble.com/v1",
+};
+
 const REGION_CODES: Record<string, string> = {
   europe: "eu-west-1",
   northAmerica: "us-east-1",
@@ -36,6 +42,7 @@ const REGION_CODES: Record<string, string> = {
 
 let cachedTcApiRootId: string | null = null;
 let cachedTcApiAllIds: string[] = [];
+let cachedLibraryIds: string[] = [];
 
 // ── Safe JSON (BigInt → Number) ──
 
@@ -273,8 +280,118 @@ async function resolveProjectIds(
   }
 }
 
+// ── REST API: Discover PSet libraries ──
+
+async function discoverLibraryIds(
+  project: ConnectProject,
+  token: string,
+): Promise<string[]> {
+  if (cachedLibraryIds.length > 0) return cachedLibraryIds;
+
+  const psetBaseUrl = REGION_PSET_URLS[project.location] ?? REGION_PSET_URLS.europe!;
+  const orgBaseUrl = REGION_ORG_URLS[project.location] ?? REGION_ORG_URLS.europe!;
+  const discovered: string[] = [];
+
+  // ── Strategy 1: Try GET /v1/libs (undocumented, might list accessible libraries) ──
+  try {
+    const url = `${psetBaseUrl}/libs`;
+    console.log(`${LOG} [Discovery] GET /v1/libs`);
+    const resp = await proxyFetch(url, token);
+    const body = await resp.text();
+    console.log(`${LOG} [Discovery] /v1/libs → HTTP ${resp.status}: ${body.slice(0, 400)}`);
+
+    if (resp.ok) {
+      const data = JSON.parse(body) as { items?: Array<{ id: string; name?: string }> };
+      const libs = data.items ?? (Array.isArray(data) ? data : []);
+      for (const lib of libs) {
+        if (lib.id) {
+          discovered.push(lib.id);
+          console.log(`${LOG} [Discovery] Library: ${lib.id} "${lib.name ?? ""}"`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`${LOG} [Discovery] /v1/libs error:`, err);
+  }
+
+  if (discovered.length > 0) {
+    cachedLibraryIds = discovered;
+    return discovered;
+  }
+
+  // ── Strategy 2: Organizer API — list forests/trees to find PSet libraries ──
+  const projectIds = [project.id, cachedTcApiRootId].filter(Boolean) as string[];
+
+  for (const pid of projectIds) {
+    try {
+      const url = `${orgBaseUrl}/forests/${encodeURIComponent(pid)}/trees`;
+      console.log(`${LOG} [Discovery] GET forests/${pid}/trees`);
+      const resp = await proxyFetch(url, token);
+      const body = await resp.text();
+      console.log(`${LOG} [Discovery] forests/${pid}/trees → HTTP ${resp.status}: ${body.slice(0, 500)}`);
+
+      if (resp.ok) {
+        const data = JSON.parse(body) as {
+          items?: Array<{
+            id: string;
+            name?: string;
+            type?: string;
+            [key: string]: unknown;
+          }>;
+        };
+        const trees = data.items ?? (Array.isArray(data) ? data : []);
+        console.log(`${LOG} [Discovery] Found ${trees.length} tree(s)`);
+
+        for (const tree of trees) {
+          console.log(`${LOG} [Discovery] Tree: ${tree.id} type="${tree.type}" name="${tree.name}"`);
+          // PSet libraries are typically trees with type "PSET" or referenced in PSet-related trees
+          if (
+            tree.type?.toUpperCase().includes("PSET") ||
+            tree.name?.toUpperCase().includes("PSET") ||
+            tree.name?.toUpperCase().includes("PROPERTY")
+          ) {
+            discovered.push(tree.id);
+            console.log(`${LOG} [Discovery] ✓ PSet tree found: ${tree.id}`);
+          }
+        }
+
+        // If no PSET tree found, try ALL tree IDs as library candidates
+        if (discovered.length === 0 && trees.length > 0) {
+          console.log(`${LOG} [Discovery] No PSET trees, trying all ${trees.length} tree IDs as lib candidates`);
+          for (const tree of trees) {
+            discovered.push(tree.id);
+          }
+        }
+
+        if (discovered.length > 0) break;
+      }
+    } catch (err) {
+      console.warn(`${LOG} [Discovery] forests/${pid}/trees error:`, err);
+    }
+  }
+
+  // ── Strategy 3: TC API — check project for psetLibraryId or similar fields ──
+  if (discovered.length === 0) {
+    for (const pid of projectIds) {
+      try {
+        const tcBaseUrl = REGION_TC_API_URLS[project.location] ?? REGION_TC_API_URLS.europe!;
+        const url = `${tcBaseUrl}/projects/${pid}/psets`;
+        console.log(`${LOG} [Discovery] GET TC projects/${pid}/psets`);
+        const resp = await proxyFetch(url, token);
+        const body = await resp.text();
+        console.log(`${LOG} [Discovery] TC projects/${pid}/psets → HTTP ${resp.status}: ${body.slice(0, 300)}`);
+      } catch (err) {
+        console.warn(`${LOG} [Discovery] TC psets error:`, err);
+      }
+    }
+  }
+
+  cachedLibraryIds = discovered;
+  console.log(`${LOG} [Discovery] Final library candidates: [${discovered.join(", ")}]`);
+  return discovered;
+}
+
 // ── REST API: Service PSet (custom properties) ──
-// Uses the official PSet API: /v1/libs/{libId}/defs, /v1/psets/{link}
 
 export async function fetchServicePsets(
   project: ConnectProject,
@@ -379,8 +496,9 @@ export async function fetchServicePsets(
     return result;
   }
 
-  // ── Approach 2: List library definitions using all candidate IDs ──
-  const libIdsToTry = projectIds;
+  // ── Approach 2: Discover libraries, then list definitions ──
+  const discoveredLibs = await discoverLibraryIds(project, token);
+  const libIdsToTry = [...new Set([...discoveredLibs, ...projectIds])];
 
   console.log(`${LOG} [PSet] psets/ returned 0. Trying libs/ with IDs: [${libIdsToTry.join(", ")}]`);
 
