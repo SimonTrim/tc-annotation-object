@@ -2,10 +2,22 @@ import type {
   TrimbleAPI,
   ObjectProperties,
   ObjectBoundingBox,
+  PropertySet,
+  ConnectProject,
+  ModelSpec,
 } from "@/types";
 
-const LOG = "[AnnotationObj]";
+const LOG = "[ViewerBridge]";
 const BATCH_SIZE = 50;
+
+// ── Region → PSet API URL ──
+
+const REGION_PSET_URLS: Record<string, string> = {
+  europe: "https://pset-api.eu-west-1.connect.trimble.com/v1",
+  northAmerica: "https://pset-api.us-east-1.connect.trimble.com/v1",
+  asia: "https://pset-api.ap-southeast-1.connect.trimble.com/v1",
+  australia: "https://pset-api.ap-southeast-2.connect.trimble.com/v1",
+};
 
 // ── Safe JSON (BigInt → Number) ──
 
@@ -34,7 +46,7 @@ function convertBigInts(obj: unknown): unknown {
   return obj;
 }
 
-// ── Données fictives (mode dev) ──
+// ── Mock data (dev mode) ──
 
 const MOCK_PROPS: ObjectProperties[] = [
   {
@@ -50,13 +62,6 @@ const MOCK_PROPS: ObjectProperties[] = [
           { name: "FireRating", value: "REI 120", type: "string" },
         ],
       },
-      {
-        set: "BaseQuantities",
-        properties: [
-          { name: "Width", value: "200 mm", type: "number" },
-          { name: "Height", value: "3000 mm", type: "number" },
-        ],
-      },
     ],
   },
 ];
@@ -65,14 +70,13 @@ const MOCK_BBOXES: ObjectBoundingBox[] = [
   { runtimeId: 1, min: { x: 0, y: 0, z: 0 }, max: { x: 5.4, y: 0.2, z: 3 } },
 ];
 
-// ── Normaliser les propriétés (format API variable + BigInt) ──
+// ── Normalize API responses ──
 
 function normalizeObjectProperties(raw: unknown[]): ObjectProperties[] {
   return raw.map((item) => {
     const obj = convertBigInts(item) as Record<string, unknown>;
     const id = (obj.id ?? obj.runtimeId ?? 0) as number;
 
-    // Normaliser les PropertySets: l'API TC utilise "name" au lieu de "set"
     const rawPsets = obj.properties as unknown[] | undefined;
     if (rawPsets && Array.isArray(rawPsets)) {
       obj.properties = rawPsets.map((ps) => {
@@ -93,7 +97,6 @@ function normalizeBoundingBoxes(raw: unknown[]): ObjectBoundingBox[] {
     const obj = convertBigInts(item) as Record<string, unknown>;
     const runtimeId = (obj.runtimeId ?? obj.id ?? 0) as number;
 
-    // L'API TC imbrique min/max dans "boundingBox"
     const bbox = (obj.boundingBox ?? obj) as Record<string, unknown>;
     const min = bbox.min as ObjectBoundingBox["min"];
     const max = bbox.max as ObjectBoundingBox["max"];
@@ -102,7 +105,7 @@ function normalizeBoundingBoxes(raw: unknown[]): ObjectBoundingBox[] {
   });
 }
 
-// ── API Viewer Bridge ──
+// ── Core API: Object Properties ──
 
 export async function fetchObjectProperties(
   api: TrimbleAPI | null,
@@ -118,11 +121,9 @@ export async function fetchObjectProperties(
     const batch = runtimeIds.slice(i, i + BATCH_SIZE);
     try {
       const props = await api.viewer.getObjectProperties(modelId, batch);
+      console.log(`${LOG} raw properties:`, safeStringify(props));
       const normalized = normalizeObjectProperties(props as unknown[]);
-
-      const psetNames = normalized.flatMap((p) => (p.properties ?? []).map((ps) => ps.set ?? "?"));
-      console.log(`${LOG} Loaded ${normalized.length} objects, PSets: [${[...new Set(psetNames)].join(", ")}]`);
-
+      console.log(`${LOG} parsed results: ${normalized.length} objects`);
       results.push(...normalized);
     } catch (err) {
       console.error(`${LOG} getObjectProperties batch failed:`, err);
@@ -130,6 +131,8 @@ export async function fetchObjectProperties(
   }
   return results;
 }
+
+// ── Core API: Bounding Boxes ──
 
 export async function fetchObjectBoundingBoxes(
   api: TrimbleAPI | null,
@@ -148,4 +151,189 @@ export async function fetchObjectBoundingBoxes(
     console.error(`${LOG} getObjectBoundingBoxes failed:`, err);
     return [];
   }
+}
+
+// ── Workspace API: Convert runtime IDs to persistent GUIDs ──
+
+export async function fetchObjectGuids(
+  api: TrimbleAPI,
+  modelId: string,
+  runtimeIds: number[],
+): Promise<Map<number, string>> {
+  try {
+    const guids = await api.viewer.convertToObjectIds(modelId, runtimeIds);
+    const map = new Map<number, string>();
+    runtimeIds.forEach((rid, i) => {
+      if (guids[i]) map.set(rid, guids[i]!);
+    });
+    console.log(`${LOG} Converted ${map.size} runtime IDs to GUIDs`);
+    return map;
+  } catch (err) {
+    console.error(`${LOG} convertToObjectIds failed:`, err);
+    return new Map();
+  }
+}
+
+// ── Workspace API: Get model list ──
+
+export async function fetchModelInfo(
+  api: TrimbleAPI,
+): Promise<ModelSpec[]> {
+  try {
+    const models = await api.viewer.getModels();
+    console.log(`${LOG} Models:`, models.map((m) => `${m.id}: ${m.name}`));
+    return models;
+  } catch (err) {
+    console.error(`${LOG} getModels failed:`, err);
+    return [];
+  }
+}
+
+// ── REST API: Service PSet (custom properties) ──
+
+export async function fetchServicePsets(
+  project: ConnectProject,
+  token: string,
+  objectGuids: string[],
+): Promise<PropertySet[]> {
+  const baseUrl = REGION_PSET_URLS[project.location] ?? REGION_PSET_URLS.europe!;
+
+  if (objectGuids.length === 0) return [];
+
+  try {
+    // Step 1: Get pset definitions for the project
+    const defsResp = await fetch(`${baseUrl}/projects/${project.id}/defs`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!defsResp.ok) {
+      console.warn(`${LOG} PSet defs HTTP ${defsResp.status} ${defsResp.statusText}`);
+      return [];
+    }
+
+    const defs = (await defsResp.json()) as Array<{
+      id: string;
+      name?: string;
+      description?: string;
+      [key: string]: unknown;
+    }>;
+    console.log(`${LOG} PSet defs: ${defs.length} definitions found`);
+
+    if (defs.length === 0) return [];
+
+    // Step 2: For each definition, find instances linked to our objects
+    const result: PropertySet[] = [];
+    const guidSet = new Set(objectGuids.map((g) => g.toLowerCase()));
+
+    for (const def of defs) {
+      try {
+        const instResp = await fetch(
+          `${baseUrl}/projects/${project.id}/defs/${def.id}/instances`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          },
+        );
+
+        if (!instResp.ok) {
+          console.warn(`${LOG} PSet instances for def ${def.id} HTTP ${instResp.status}`);
+          continue;
+        }
+
+        const instances = (await instResp.json()) as Array<{
+          id: string;
+          props?: Record<string, unknown>;
+          links?: string[];
+          [key: string]: unknown;
+        }>;
+
+        // Filter instances linked to our objects
+        for (const inst of instances) {
+          const links = inst.links ?? [];
+          const isLinked = links.some((link) => {
+            const lower = link.toLowerCase();
+            return [...guidSet].some((guid) => lower.includes(guid));
+          });
+
+          if (isLinked && inst.props) {
+            const properties = Object.entries(inst.props)
+              .filter(([, v]) => v != null && v !== "")
+              .map(([name, value]) => ({
+                name,
+                value: value as string | number,
+                type: typeof value,
+              }));
+
+            if (properties.length > 0) {
+              result.push({
+                set: def.name ?? `PSet personnalisé (${def.id.slice(0, 8)})`,
+                properties,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`${LOG} PSet instances fetch error for def ${def.id}:`, err);
+      }
+    }
+
+    console.log(`${LOG} Service PSet: ${result.length} property sets matched`);
+    return result;
+  } catch (err) {
+    console.error(`${LOG} fetchServicePsets failed:`, err);
+    return [];
+  }
+}
+
+// ── Enrichment: add GUIDs, model info, and service psets to ObjectProperties ──
+
+export async function enrichObjectProperties(
+  api: TrimbleAPI,
+  project: ConnectProject | null,
+  token: string | null,
+  modelId: string,
+  objects: ObjectProperties[],
+  runtimeIds: number[],
+): Promise<ObjectProperties[]> {
+  if (objects.length === 0) return objects;
+
+  // 1. Fetch GUIDs
+  const guidMap = await fetchObjectGuids(api, modelId, runtimeIds);
+
+  // 2. Fetch model info
+  const models = await fetchModelInfo(api);
+  const modelInfo = models.find((m) => m.id === modelId);
+
+  // 3. Enrich each object with GUID and model info
+  const enriched = objects.map((obj) => {
+    const raw = { ...obj } as Record<string, unknown>;
+    const guid = guidMap.get(obj.id);
+    if (guid) raw.guid = guid;
+    if (modelInfo?.name) raw.fileName = modelInfo.name;
+    return raw as ObjectProperties;
+  });
+
+  // 4. Fetch service psets if project + token available
+  if (project && token && guidMap.size > 0) {
+    try {
+      const guids = [...guidMap.values()];
+      const servicePsets = await fetchServicePsets(project, token, guids);
+
+      if (servicePsets.length > 0) {
+        for (const obj of enriched) {
+          obj.properties = [...(obj.properties ?? []), ...servicePsets];
+        }
+        console.log(`${LOG} Enriched with ${servicePsets.length} service pset groups`);
+      }
+    } catch (err) {
+      console.error(`${LOG} Service PSet enrichment failed:`, err);
+    }
+  }
+
+  return enriched;
 }

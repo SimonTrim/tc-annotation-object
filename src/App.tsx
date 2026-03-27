@@ -31,8 +31,8 @@ const AboutTab = lazy(() =>
 
 function AppContent() {
   const { settings, updateSettings, resetSettings } = useSettings();
-  const { selection, api } = useTrimbleContext();
-  const annotations = useAnnotations(api, selection, settings);
+  const { selection, api, project, accessToken } = useTrimbleContext();
+  const annotations = useAnnotations(api, selection, settings, project, accessToken);
 
   return (
     <Tabs defaultValue="inquire" className="flex flex-col h-full">

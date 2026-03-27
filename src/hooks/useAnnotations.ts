@@ -5,11 +5,13 @@ import type {
   ObjectProperties,
   PropertyToggleState,
   AnnotationSettings,
+  ConnectProject,
   SortMode,
 } from "@/types";
 import {
   fetchObjectProperties,
   fetchObjectBoundingBoxes,
+  enrichObjectProperties,
 } from "@/lib/viewerBridge";
 import {
   createAnnotationsForObject,
@@ -30,6 +32,8 @@ export function useAnnotations(
   api: TrimbleAPI | null,
   selection: ViewerSelection[],
   settings: AnnotationSettings,
+  project: ConnectProject | null,
+  accessToken: string | null,
 ) {
   const [properties, setProperties] = useState<PropertyToggleState[]>([]);
   const [enabledOrder, setEnabledOrder] = useState<string[]>([]);
@@ -134,7 +138,13 @@ export function useAnnotations(
           console.log(`${LOG} Fetching props for model=${sel.modelId}, ids=[${ids.join(",")}]`);
           const batch = await fetchObjectProperties(api, sel.modelId, ids);
           console.log(`${LOG} Got ${batch.length} results`, batch);
-          allProps.push(...batch);
+
+          // Enrichir avec GUIDs, model info et service psets
+          const enriched = api
+            ? await enrichObjectProperties(api, project, accessToken, sel.modelId, batch, ids)
+            : batch;
+
+          allProps.push(...enriched);
         }
 
         if (!cancelled) {
@@ -153,7 +163,7 @@ export function useAnnotations(
     load();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selection, extractProperties]);
+  }, [api, selection, extractProperties, project, accessToken]);
 
   const enabledKey = useMemo(
     () => enabledOrder.join("|"),
