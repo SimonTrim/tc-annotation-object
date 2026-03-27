@@ -15,6 +15,13 @@ import {
   createAnnotationsForObject,
   removeMarkupIds,
 } from "@/lib/annotationEngine";
+import {
+  REF_GROUP,
+  IDENTITY_GROUP,
+  TOP_LEVEL_LABELS,
+  PRODUCT_LABELS,
+  SKIP_TOP_LEVEL,
+} from "@/lib/propertyMapping";
 
 const LOG = "[AnnotationObj]";
 const REFRESH_DEBOUNCE = 500;
@@ -55,51 +62,40 @@ export function useAnnotations(
       const seen = new Set<string>();
       const result: PropertyToggleState[] = [];
 
+      const add = (pset: string, name: string) => {
+        const key = `${pset}::${name}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push({ key, propertySet: pset, propertyName: name, enabled: currentOrder.has(key) });
+      };
+
       for (const obj of propsArray) {
-        if (obj.class) {
-          const key = "Identité::Classe IFC";
-          if (!seen.has(key)) {
-            seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Classe IFC", enabled: currentOrder.has(key) });
-          }
+        const raw = obj as unknown as Record<string, unknown>;
+
+        // ── Référence Objet : tous les champs scalaires du top-level ──
+        for (const [field, val] of Object.entries(raw)) {
+          if (SKIP_TOP_LEVEL.has(field) || val == null || val === "" || typeof val === "object") continue;
+          const label = TOP_LEVEL_LABELS[field] ?? field;
+          add(REF_GROUP, label);
         }
-        if (obj.product?.name) {
-          const key = "Identité::Nom";
-          if (!seen.has(key)) {
-            seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Nom", enabled: currentOrder.has(key) });
-          }
-        }
-        if (obj.product?.objectType) {
-          const key = "Identité::Type d'objet";
-          if (!seen.has(key)) {
-            seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Type d'objet", enabled: currentOrder.has(key) });
-          }
-        }
-        if (obj.product?.description) {
-          const key = "Identité::Description";
-          if (!seen.has(key)) {
-            seen.add(key);
-            result.push({ key, propertySet: "Identité", propertyName: "Description", enabled: currentOrder.has(key) });
+
+        // ── Identité : tous les champs scalaires du product ──
+        if (obj.product) {
+          const prodRaw = obj.product as unknown as Record<string, unknown>;
+          for (const [field, val] of Object.entries(prodRaw)) {
+            if (val == null || val === "" || typeof val === "object") continue;
+            const label = PRODUCT_LABELS[field] ?? field;
+            add(IDENTITY_GROUP, label);
           }
         }
 
+        // ── PropertySets ──
         for (const pset of obj.properties ?? []) {
           const setName = pset.set
             ?? ((pset as unknown as Record<string, unknown>).name as string)
             ?? "Autres";
           for (const prop of pset.properties ?? []) {
-            const key = `${setName}::${prop.name}`;
-            if (!seen.has(key)) {
-              seen.add(key);
-              result.push({
-                key,
-                propertySet: setName,
-                propertyName: prop.name,
-                enabled: currentOrder.has(key),
-              });
-            }
+            add(setName, prop.name);
           }
         }
       }

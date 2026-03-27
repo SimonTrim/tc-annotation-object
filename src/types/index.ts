@@ -85,12 +85,35 @@ export interface ObjectProperties {
   position?: Vector3;
   product?: Product;
   properties?: PropertySet[];
+  globalId?: string;
+  guid?: string;
+  fileFormat?: string;
+  fileName?: string;
+  layer?: string;
+  [key: string]: unknown;
 }
 
 export interface Product {
   name?: string;
   description?: string;
   objectType?: string;
+  state?: number;
+  changeAction?: number;
+  creationDate?: number;
+  lastModificationDate?: number;
+  applicationIdentifier?: string;
+  applicationFullName?: string;
+  applicationVersion?: string;
+  organizationId?: string;
+  organizationName?: string;
+  organizationDescription?: string;
+  organizationRoles?: string;
+  personId?: string;
+  personFamilyName?: string;
+  personGivenName?: string;
+  personRoles?: string;
+  personMiddleNames?: string;
+  [key: string]: unknown;
 }
 
 export interface PropertySet {

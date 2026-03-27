@@ -8,6 +8,13 @@ import type {
   TextMarkup,
   ColorRGBA,
 } from "@/types";
+import {
+  REF_GROUP,
+  IDENTITY_GROUP,
+  TOP_LEVEL_LABELS,
+  PRODUCT_LABELS,
+  findFieldByLabel,
+} from "@/lib/propertyMapping";
 
 const LOG = "[AnnotationEngine]";
 
@@ -23,6 +30,40 @@ function hexToRgba(hex: string, alpha = 255): ColorRGBA {
   };
 }
 
+function resolveValue(
+  obj: ObjectProperties,
+  toggle: PropertyToggleState,
+): string | null {
+  const raw = obj as unknown as Record<string, unknown>;
+
+  // "Référence Objet" → top-level object fields
+  if (toggle.propertySet === REF_GROUP) {
+    const field = findFieldByLabel(TOP_LEVEL_LABELS, toggle.propertyName) ?? toggle.propertyName;
+    const val = raw[field];
+    if (val != null && val !== "") return String(val);
+    return null;
+  }
+
+  // "Identité" → product sub-object fields
+  if (toggle.propertySet === IDENTITY_GROUP) {
+    const prodRaw = (obj.product ?? {}) as unknown as Record<string, unknown>;
+    const field = findFieldByLabel(PRODUCT_LABELS, toggle.propertyName) ?? toggle.propertyName;
+    const val = prodRaw[field];
+    if (val != null && val !== "") return String(val);
+    return null;
+  }
+
+  // PropertySets
+  for (const pset of obj.properties ?? []) {
+    const setName = pset.set ?? (pset as unknown as Record<string, unknown>).name as string ?? "Autres";
+    if (setName !== toggle.propertySet) continue;
+    const prop = pset.properties?.find((p) => p.name === toggle.propertyName);
+    if (prop) return String(prop.value);
+  }
+
+  return null;
+}
+
 function buildAnnotationText(
   obj: ObjectProperties,
   enabledProps: PropertyToggleState[],
@@ -31,37 +72,10 @@ function buildAnnotationText(
   const parts: string[] = [];
 
   for (const toggle of enabledProps) {
-    if (toggle.key === "Identité::Classe IFC" && obj.class) {
-      parts.push(obj.class);
-      continue;
-    }
-    if (toggle.key === "Identité::Nom" && obj.product?.name) {
-      parts.push(obj.product.name);
-      continue;
-    }
-    if (toggle.key === "Identité::Type d'objet" && obj.product?.objectType) {
-      parts.push(obj.product.objectType);
-      continue;
-    }
-    if (toggle.key === "Identité::Description" && obj.product?.description) {
-      parts.push(obj.product.description);
-      continue;
-    }
-
-    let found = false;
-    for (const pset of obj.properties ?? []) {
-      const setName = pset.set ?? (pset as unknown as Record<string, unknown>).name as string ?? "Autres";
-      if (setName !== toggle.propertySet) continue;
-      const prop = pset.properties?.find((p) => p.name === toggle.propertyName);
-      if (prop) {
-        const value = String(prop.value);
-        parts.push(settings.showUnits ? value : value.replace(/\s*(mm|m|kg|m²|m³)$/i, "").trim());
-        found = true;
-        break;
-      }
-    }
-
-    if (!found) {
+    const value = resolveValue(obj, toggle);
+    if (value != null) {
+      parts.push(settings.showUnits ? value : value.replace(/\s*(mm|m|kg|m²|m³)$/i, "").trim());
+    } else {
       console.warn(`${LOG} Property not found: ${toggle.key} in object id=${obj.id}`);
     }
   }
