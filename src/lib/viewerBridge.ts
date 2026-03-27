@@ -34,7 +34,8 @@ const REGION_CODES: Record<string, string> = {
   australia: "ap-southeast-2",
 };
 
-let cachedProjectUuid: string | null = null;
+let cachedTcApiRootId: string | null = null;
+let cachedTcApiAllIds: string[] = [];
 
 // ── Safe JSON (BigInt → Number) ──
 
@@ -221,20 +222,13 @@ async function proxyFetch(
   });
 }
 
-// ── REST API: Resolve project UUID from TC API v2 ──
+// ── REST API: Resolve project IDs from TC API v2 ──
 
-async function resolveProjectUuid(
+async function resolveProjectIds(
   project: ConnectProject,
   token: string,
-): Promise<string | null> {
-  if (cachedProjectUuid) return cachedProjectUuid;
-
-  // Use rootId from the workspace API if available (often already a UUID)
-  if (project.rootId && project.rootId.length > 20) {
-    console.log(`${LOG} [UUID] Using project.rootId: ${project.rootId}`);
-    cachedProjectUuid = project.rootId;
-    return project.rootId;
-  }
+): Promise<void> {
+  if (cachedTcApiAllIds.length > 0) return;
 
   const tcBaseUrl = REGION_TC_API_URLS[project.location] ?? REGION_TC_API_URLS.europe!;
   const url = `${tcBaseUrl}/projects/${project.id}`;
@@ -245,30 +239,37 @@ async function resolveProjectUuid(
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       console.warn(`${LOG} [UUID] HTTP ${resp.status}: ${body.slice(0, 300)}`);
-      return project.id;
+      return;
     }
 
     const data = (await resp.json()) as Record<string, unknown>;
     console.log(`${LOG} [UUID] Response keys:`, Object.keys(data));
-    console.log(`${LOG} [UUID] id=${data.id}, rootId=${data.rootId}, projectId=${data.projectId}`);
 
-    const candidates = [data.rootId, data.projectId, data.uuid, data.id];
-    let uuid: string | null = null;
-    for (const c of candidates) {
-      if (typeof c === "string" && c.length > 20) {
-        uuid = c;
-        break;
+    // Log ALL string values to discover identifiers
+    const stringFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (typeof v === "string" && v.length > 0 && v.length < 100) {
+        stringFields[k] = v;
       }
     }
+    console.log(`${LOG} [UUID] String fields:`, JSON.stringify(stringFields));
 
-    if (!uuid) uuid = data.id as string;
+    // Collect all unique IDs from known fields
+    const idCandidates = [
+      data.rootId,
+      data.id,
+      data.projectId,
+      data.uuid,
+      data.parentId,
+      data.accountId,
+      project.rootId,
+    ].filter((v): v is string => typeof v === "string" && v.length > 0);
 
-    console.log(`${LOG} [UUID] Resolved: ${uuid}`);
-    cachedProjectUuid = uuid;
-    return uuid;
+    cachedTcApiAllIds = [...new Set(idCandidates)];
+    cachedTcApiRootId = (data.rootId as string) ?? null;
+    console.log(`${LOG} [UUID] rootId=${cachedTcApiRootId}, allIds=[${cachedTcApiAllIds.join(", ")}]`);
   } catch (err) {
-    console.error(`${LOG} [UUID] resolveProjectUuid failed:`, err);
-    return project.id;
+    console.error(`${LOG} [UUID] resolveProjectIds failed:`, err);
   }
 }
 
@@ -279,31 +280,59 @@ export async function fetchServicePsets(
   project: ConnectProject,
   token: string,
   objectGuids: string[],
+  modelId?: string,
+  versionId?: string,
 ): Promise<PropertySet[]> {
   const psetBaseUrl = REGION_PSET_URLS[project.location] ?? REGION_PSET_URLS.europe!;
   const regionCode = REGION_CODES[project.location] ?? "eu-west-1";
 
   if (objectGuids.length === 0) return [];
 
+  // Resolve all project IDs from TC API
+  await resolveProjectIds(project, token);
+
   console.log(`${LOG} [PSet] Starting — GUIDs=[${objectGuids.join(", ")}], region=${regionCode}`);
 
-  // ── Approach 1: Query PSets directly by link (FRN) for each object GUID ──
+  // ── Approach 1: Query PSets directly by link (many FRN formats) ──
   const result: PropertySet[] = [];
 
+  // Build all candidate project IDs
+  const projectIds = [...new Set([
+    project.id,
+    cachedTcApiRootId,
+    ...cachedTcApiAllIds,
+  ].filter(Boolean))] as string[];
+
   for (const guid of objectGuids) {
+    // Try many possible FRN link formats
     const linksToTry = [
       guid,
-      `tcps:${regionCode}:${project.id}:objects:${guid}`,
-      `tcps:${regionCode}:${project.id}/objects/${guid}`,
+      ...projectIds.flatMap((pid) => [
+        `tcps:${regionCode}:${pid}:objects:${guid}`,
+        `tcps:${regionCode}:${pid}/objects/${guid}`,
+      ]),
     ];
+
+    // Also try with model/version context
+    if (modelId) {
+      projectIds.forEach((pid) => {
+        linksToTry.push(`tcps:${regionCode}:${pid}:files:${modelId}:objects:${guid}`);
+        linksToTry.push(`tcps:${regionCode}:${pid}/files/${modelId}/objects/${guid}`);
+      });
+      if (versionId) {
+        projectIds.forEach((pid) => {
+          linksToTry.push(`tcps:${regionCode}:${pid}:versions:${versionId}:objects:${guid}`);
+        });
+      }
+    }
 
     for (const link of linksToTry) {
       try {
         const url = `${psetBaseUrl}/psets/${encodeURIComponent(link)}`;
-        console.log(`${LOG} [PSet] GET psets/${link.slice(0, 60)}`);
+        console.log(`${LOG} [PSet] GET psets/${link}`);
         const resp = await proxyFetch(url, token);
         const body = await resp.text();
-        console.log(`${LOG} [PSet] psets/ → HTTP ${resp.status}: ${body.slice(0, 300)}`);
+        console.log(`${LOG} [PSet] psets/ → HTTP ${resp.status}: ${body.slice(0, 200)}`);
 
         if (resp.ok) {
           const data = JSON.parse(body) as {
@@ -318,7 +347,7 @@ export async function fetchServicePsets(
 
           const items = data.items ?? (Array.isArray(data) ? data : []);
           if (items.length > 0) {
-            console.log(`${LOG} [PSet] ✓ Found ${items.length} PSet(s) via link: ${link.slice(0, 60)}`);
+            console.log(`${LOG} [PSet] ✓ Found ${items.length} PSet(s) via link: ${link}`);
             for (const inst of items) {
               if (inst.props) {
                 const defName = await fetchDefName(psetBaseUrl, token, inst.libId, inst.defId);
@@ -341,6 +370,8 @@ export async function fetchServicePsets(
         console.warn(`${LOG} [PSet] psets/ error:`, err);
       }
     }
+
+    if (result.length > 0) break;
   }
 
   if (result.length > 0) {
@@ -348,11 +379,10 @@ export async function fetchServicePsets(
     return result;
   }
 
-  // ── Approach 2: List library definitions then query instances ──
-  const projectUuid = await resolveProjectUuid(project, token);
-  const libIdsToTry = [...new Set([projectUuid, project.rootId, project.id].filter(Boolean))] as string[];
+  // ── Approach 2: List library definitions using all candidate IDs ──
+  const libIdsToTry = projectIds;
 
-  console.log(`${LOG} [PSet] psets/ approach returned 0, trying libs/ with IDs: [${libIdsToTry.join(", ")}]`);
+  console.log(`${LOG} [PSet] psets/ returned 0. Trying libs/ with IDs: [${libIdsToTry.join(", ")}]`);
 
   for (const libId of libIdsToTry) {
     try {
@@ -370,7 +400,7 @@ export async function fetchServicePsets(
       const defs = defsData.items ?? (Array.isArray(defsData) ? defsData : []);
 
       if (defs.length === 0) {
-        console.log(`${LOG} [PSet] libs/${libId} has 0 definitions, trying next...`);
+        console.log(`${LOG} [PSet] libs/${libId} has 0 definitions`);
         continue;
       }
 
@@ -388,11 +418,7 @@ export async function fetchServicePsets(
           }
 
           const psetsData = (await psetsResp.json()) as {
-            items?: Array<{
-              link: string;
-              props?: Record<string, unknown>;
-              [key: string]: unknown;
-            }>;
+            items?: Array<{ link: string; props?: Record<string, unknown> }>;
           };
           const instances = psetsData.items ?? (Array.isArray(psetsData) ? psetsData : []);
 
@@ -433,19 +459,16 @@ export async function fetchServicePsets(
     }
   }
 
-  // ── Approach 3: Try getLibrary to check if the ID is valid ──
+  // ── Approach 3: Diagnostic — check if any ID is a valid library ──
   if (result.length === 0) {
-    console.log(`${LOG} [PSet] libs/defs approach returned 0, trying GET libs/{id} diagnostic`);
+    console.log(`${LOG} [PSet] All approaches returned 0. Diagnostic GET libs/{id}:`);
     for (const libId of libIdsToTry) {
       try {
         const url = `${psetBaseUrl}/libs/${encodeURIComponent(libId)}`;
-        console.log(`${LOG} [PSet] GET libs/${libId}`);
         const resp = await proxyFetch(url, token);
         const body = await resp.text();
-        console.log(`${LOG} [PSet] libs/${libId} → HTTP ${resp.status}: ${body.slice(0, 300)}`);
-      } catch (err) {
-        console.warn(`${LOG} [PSet] libs/${libId} diagnostic error:`, err);
-      }
+        console.log(`${LOG} [PSet] libs/${libId} → HTTP ${resp.status}: ${body.slice(0, 200)}`);
+      } catch { /* ignore */ }
     }
   }
 
@@ -506,7 +529,9 @@ export async function enrichObjectProperties(
   if (project && token && guidMap.size > 0) {
     try {
       const guids = [...guidMap.values()];
-      const servicePsets = await fetchServicePsets(project, token, guids);
+      const servicePsets = await fetchServicePsets(
+        project, token, guids, modelId, modelInfo?.versionId,
+      );
 
       if (servicePsets.length > 0) {
         for (const obj of enriched) {
