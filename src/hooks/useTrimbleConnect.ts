@@ -115,7 +115,8 @@ export function useTrimbleConnect(): TrimbleConnectState {
           console.log(`${LOG} Connected! Fetching project...`);
 
           const project = await api.project.getCurrentProject();
-          console.log(`${LOG} Project: ${project.name} (${project.id}), region: ${project.location}`);
+          console.log(`${LOG} Project: ${project.name} (${project.id}), region: ${project.location}, rootId: ${(project as unknown as Record<string, unknown>).rootId ?? "N/A"}`);
+          console.log(`${LOG} Project keys:`, Object.keys(project));
 
           const token = await api.extension.requestPermission("accesstoken");
           const hasToken = token !== "pending" && token !== "denied";
