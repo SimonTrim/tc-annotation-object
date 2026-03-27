@@ -189,6 +189,21 @@ export async function fetchModelInfo(
   }
 }
 
+// ── Proxy fetch (via Vercel Edge proxy to avoid CORS) ──
+
+async function proxyFetch(
+  targetUrl: string,
+  token: string,
+): Promise<Response> {
+  const proxyUrl = `/api/pset-proxy?url=${encodeURIComponent(targetUrl)}`;
+  return fetch(proxyUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+}
+
 // ── REST API: Service PSet (custom properties) ──
 
 export async function fetchServicePsets(
@@ -202,15 +217,13 @@ export async function fetchServicePsets(
 
   try {
     // Step 1: Get pset definitions for the project
-    const defsResp = await fetch(`${baseUrl}/projects/${project.id}/defs`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
-    });
+    const defsUrl = `${baseUrl}/projects/${project.id}/defs`;
+    console.log(`${LOG} Fetching PSet defs: ${defsUrl}`);
+    const defsResp = await proxyFetch(defsUrl, token);
 
     if (!defsResp.ok) {
-      console.warn(`${LOG} PSet defs HTTP ${defsResp.status} ${defsResp.statusText}`);
+      const body = await defsResp.text().catch(() => "");
+      console.warn(`${LOG} PSet defs HTTP ${defsResp.status}: ${body.slice(0, 200)}`);
       return [];
     }
 
@@ -220,7 +233,7 @@ export async function fetchServicePsets(
       description?: string;
       [key: string]: unknown;
     }>;
-    console.log(`${LOG} PSet defs: ${defs.length} definitions found`);
+    console.log(`${LOG} PSet defs: ${defs.length} definitions found`, defs.map((d) => d.name));
 
     if (defs.length === 0) return [];
 
@@ -230,18 +243,11 @@ export async function fetchServicePsets(
 
     for (const def of defs) {
       try {
-        const instResp = await fetch(
-          `${baseUrl}/projects/${project.id}/defs/${def.id}/instances`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: "application/json",
-            },
-          },
-        );
+        const instUrl = `${baseUrl}/projects/${project.id}/defs/${def.id}/instances`;
+        const instResp = await proxyFetch(instUrl, token);
 
         if (!instResp.ok) {
-          console.warn(`${LOG} PSet instances for def ${def.id} HTTP ${instResp.status}`);
+          console.warn(`${LOG} PSet instances for "${def.name}" HTTP ${instResp.status}`);
           continue;
         }
 
@@ -252,7 +258,8 @@ export async function fetchServicePsets(
           [key: string]: unknown;
         }>;
 
-        // Filter instances linked to our objects
+        console.log(`${LOG} PSet "${def.name}": ${instances.length} instances, checking links for ${guidSet.size} GUIDs`);
+
         for (const inst of instances) {
           const links = inst.links ?? [];
           const isLinked = links.some((link) => {
@@ -278,7 +285,7 @@ export async function fetchServicePsets(
           }
         }
       } catch (err) {
-        console.warn(`${LOG} PSet instances fetch error for def ${def.id}:`, err);
+        console.warn(`${LOG} PSet instances fetch error for "${def.name}":`, err);
       }
     }
 
@@ -309,12 +316,16 @@ export async function enrichObjectProperties(
   const models = await fetchModelInfo(api);
   const modelInfo = models.find((m) => m.id === modelId);
 
-  // 3. Enrich each object with GUID and model info
+  // 3. Enrich each object with GUID, model info, and file format
   const enriched = objects.map((obj) => {
     const raw = { ...obj } as Record<string, unknown>;
     const guid = guidMap.get(obj.id);
     if (guid) raw.guid = guid;
-    if (modelInfo?.name) raw.fileName = modelInfo.name;
+    if (modelInfo?.name) {
+      raw.fileName = modelInfo.name;
+      const ext = modelInfo.name.split(".").pop();
+      if (ext) raw.fileFormat = ext.toUpperCase();
+    }
     return raw as ObjectProperties;
   });
 
