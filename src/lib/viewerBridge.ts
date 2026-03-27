@@ -213,7 +213,7 @@ async function proxyFetch(
   });
 }
 
-// ── REST API: Resolve project UUID from short ID ──
+// ── REST API: Resolve project UUID from TC API v2 ──
 
 async function resolveProjectUuid(
   project: ConnectProject,
@@ -223,27 +223,38 @@ async function resolveProjectUuid(
 
   const tcBaseUrl = REGION_TC_API_URLS[project.location] ?? REGION_TC_API_URLS.europe!;
   const url = `${tcBaseUrl}/projects/${project.id}`;
-  console.log(`${LOG} Resolving project UUID: ${url}`);
+  console.log(`${LOG} [UUID] Fetching project details: ${url}`);
 
   try {
     const resp = await proxyFetch(url, token);
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      console.warn(`${LOG} Project resolve HTTP ${resp.status}: ${body.slice(0, 200)}`);
+      console.warn(`${LOG} [UUID] Project resolve HTTP ${resp.status}: ${body.slice(0, 300)}`);
       return null;
     }
 
     const data = (await resp.json()) as Record<string, unknown>;
-    const uuid = (data.id ?? data.uuid ?? data.projectId) as string | undefined;
-    console.log(`${LOG} Project UUID resolved: ${uuid}`);
+    console.log(`${LOG} [UUID] Full project response keys:`, Object.keys(data));
+    console.log(`${LOG} [UUID] id=${data.id}, rootId=${data.rootId}, projectId=${data.projectId}`);
 
-    if (uuid) {
-      cachedProjectUuid = uuid;
-      return uuid;
+    // Try different UUID fields — TC API might return UUID in various fields
+    const candidates = [data.rootId, data.projectId, data.uuid, data.id];
+    let uuid: string | null = null;
+    for (const c of candidates) {
+      if (typeof c === "string" && c.length > 20) {
+        uuid = c;
+        break;
+      }
     }
-    return null;
+
+    // If no long UUID found, fallback to id
+    if (!uuid) uuid = data.id as string;
+
+    console.log(`${LOG} [UUID] Resolved: ${uuid}`);
+    cachedProjectUuid = uuid;
+    return uuid;
   } catch (err) {
-    console.error(`${LOG} resolveProjectUuid failed:`, err);
+    console.error(`${LOG} [UUID] resolveProjectUuid failed:`, err);
     return null;
   }
 }
@@ -255,97 +266,125 @@ export async function fetchServicePsets(
   token: string,
   objectGuids: string[],
 ): Promise<PropertySet[]> {
-  const baseUrl = REGION_PSET_URLS[project.location] ?? REGION_PSET_URLS.europe!;
+  const psetBaseUrl = REGION_PSET_URLS[project.location] ?? REGION_PSET_URLS.europe!;
 
   if (objectGuids.length === 0) return [];
 
-  // Resolve the project UUID (PSet API needs UUID, not short ID)
-  const projectUuid = await resolveProjectUuid(project, token);
-  if (!projectUuid) {
+  // Resolve the project UUID
+  const projectId = await resolveProjectUuid(project, token);
+  if (!projectId) {
     console.warn(`${LOG} Cannot resolve project UUID, skipping service psets`);
     return [];
   }
 
-  try {
-    // Step 1: Get pset definitions for the project
-    const defsUrl = `${baseUrl}/projects/${projectUuid}/defs`;
-    console.log(`${LOG} Fetching PSet defs: ${defsUrl}`);
-    const defsResp = await proxyFetch(defsUrl, token);
+  console.log(`${LOG} [PSet] Using projectId=${projectId}, GUIDs=[${objectGuids.join(", ")}]`);
 
-    if (!defsResp.ok) {
-      const body = await defsResp.text().catch(() => "");
-      console.warn(`${LOG} PSet defs HTTP ${defsResp.status}: ${body.slice(0, 200)}`);
-      return [];
-    }
+  // Try multiple endpoint patterns since API structure is uncertain
+  const endpointsToTry = [
+    `${psetBaseUrl}/projects/${projectId}/defs`,
+    `${psetBaseUrl}/projects/${projectId}/libs`,
+    `${psetBaseUrl}/projects/${project.id}/defs`,
+    `${psetBaseUrl}/projects/${project.id}/libs`,
+  ];
 
-    const defs = (await defsResp.json()) as Array<{
-      id: string;
-      name?: string;
-      description?: string;
-      [key: string]: unknown;
-    }>;
-    console.log(`${LOG} PSet defs: ${defs.length} definitions found`, defs.map((d) => d.name));
+  let defs: Array<{ id: string; name?: string; [key: string]: unknown }> = [];
+  let workingBaseProjectUrl = "";
 
-    if (defs.length === 0) return [];
+  for (const url of endpointsToTry) {
+    console.log(`${LOG} [PSet] Trying: ${url}`);
+    try {
+      const resp = await proxyFetch(url, token);
+      const body = await resp.text();
+      console.log(`${LOG} [PSet] ${url} → HTTP ${resp.status}: ${body.slice(0, 300)}`);
 
-    // Step 2: For each definition, find instances linked to our objects
-    const result: PropertySet[] = [];
-    const guidSet = new Set(objectGuids.map((g) => g.toLowerCase()));
-
-    for (const def of defs) {
-      try {
-        const instUrl = `${baseUrl}/projects/${projectUuid}/defs/${def.id}/instances`;
-        const instResp = await proxyFetch(instUrl, token);
-
-        if (!instResp.ok) {
-          console.warn(`${LOG} PSet instances for "${def.name}" HTTP ${instResp.status}`);
-          continue;
+      if (resp.ok) {
+        const parsed = JSON.parse(body);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          defs = parsed;
+          // Extract the working project URL pattern
+          const urlParts = url.split("/");
+          urlParts.pop(); // remove 'defs' or 'libs'
+          workingBaseProjectUrl = urlParts.join("/");
+          console.log(`${LOG} [PSet] SUCCESS! Found ${defs.length} entries at ${url}`);
+          break;
         }
-
-        const instances = (await instResp.json()) as Array<{
-          id: string;
-          props?: Record<string, unknown>;
-          links?: string[];
-          [key: string]: unknown;
-        }>;
-
-        console.log(`${LOG} PSet "${def.name}": ${instances.length} instances, checking links for ${guidSet.size} GUIDs`);
-
-        for (const inst of instances) {
-          const links = inst.links ?? [];
-          const isLinked = links.some((link) => {
-            const lower = link.toLowerCase();
-            return [...guidSet].some((guid) => lower.includes(guid));
-          });
-
-          if (isLinked && inst.props) {
-            const properties = Object.entries(inst.props)
-              .filter(([, v]) => v != null && v !== "")
-              .map(([name, value]) => ({
-                name,
-                value: value as string | number,
-                type: typeof value,
-              }));
-
-            if (properties.length > 0) {
-              result.push({
-                set: def.name ?? `PSet personnalisé (${def.id.slice(0, 8)})`,
-                properties,
-              });
-            }
-          }
+        // If array is empty, it might be valid but no defs — try next
+        if (Array.isArray(parsed) && parsed.length === 0) {
+          console.log(`${LOG} [PSet] Empty array at ${url}, trying next...`);
+          // Still mark as working if endpoint is valid
+          const urlParts = url.split("/");
+          urlParts.pop();
+          workingBaseProjectUrl = urlParts.join("/");
         }
-      } catch (err) {
-        console.warn(`${LOG} PSet instances fetch error for "${def.name}":`, err);
       }
+    } catch (err) {
+      console.warn(`${LOG} [PSet] Error at ${url}:`, err);
     }
+  }
 
-    console.log(`${LOG} Service PSet: ${result.length} property sets matched`);
-    return result;
-  } catch (err) {
-    console.error(`${LOG} fetchServicePsets failed:`, err);
+  if (defs.length === 0) {
+    console.warn(`${LOG} [PSet] No definitions found at any endpoint`);
     return [];
   }
+
+  // Step 2: For each definition, find instances linked to our objects
+  const result: PropertySet[] = [];
+  const guidSet = new Set(objectGuids.map((g) => g.toLowerCase()));
+
+  for (const def of defs) {
+    try {
+      const instUrl = `${workingBaseProjectUrl}/defs/${def.id}/instances`;
+      const instResp = await proxyFetch(instUrl, token);
+
+      if (!instResp.ok) {
+        console.warn(`${LOG} [PSet] Instances for "${def.name}" HTTP ${instResp.status}`);
+        continue;
+      }
+
+      const instances = (await instResp.json()) as Array<{
+        id: string;
+        props?: Record<string, unknown>;
+        links?: string[];
+        [key: string]: unknown;
+      }>;
+
+      console.log(`${LOG} [PSet] "${def.name}": ${instances.length} instances`);
+      if (instances.length > 0) {
+        console.log(`${LOG} [PSet] Sample instance keys:`, Object.keys(instances[0]!));
+        console.log(`${LOG} [PSet] Sample links:`, instances[0]!.links?.slice(0, 3));
+      }
+
+      for (const inst of instances) {
+        const links = inst.links ?? [];
+        const isLinked = links.some((link) => {
+          const lower = link.toLowerCase();
+          return [...guidSet].some((guid) => lower.includes(guid));
+        });
+
+        if (isLinked && inst.props) {
+          const properties = Object.entries(inst.props)
+            .filter(([, v]) => v != null && v !== "")
+            .map(([name, value]) => ({
+              name,
+              value: value as string | number,
+              type: typeof value,
+            }));
+
+          if (properties.length > 0) {
+            result.push({
+              set: def.name ?? `PSet personnalisé (${def.id.slice(0, 8)})`,
+              properties,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`${LOG} [PSet] Error for "${def.name}":`, err);
+    }
+  }
+
+  console.log(`${LOG} [PSet] Final result: ${result.length} property sets matched for ${guidSet.size} objects`);
+  return result;
 }
 
 // ── Enrichment: add GUIDs, model info, and service psets to ObjectProperties ──
